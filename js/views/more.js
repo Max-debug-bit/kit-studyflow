@@ -10,7 +10,7 @@ import {
   toTimeStr
 } from '../store.js';
 import { AVAILABLE_MODELS, testGeminiConnection } from '../gemini.js';
-import { createPrivateGist, pullFromGist, pushToGist, syncNow, listGistArchives, restoreArchiveSnapshot } from '../sync.js';
+import { createPrivateGist, pullFromGist, pushToGist, syncNow, listGistArchives, restoreArchiveSnapshot, normalizeGistId } from '../sync.js';
 import { syncModulesFromIcs } from '../ics.js';
 import { syncAnkiConnect, setManualAnki, getAnkiLoadSummary } from '../anki.js';
 import { renderQrSvg, encodePairingCode } from '../qr.js';
@@ -205,13 +205,18 @@ export function renderMoreView(root, ctx) {
         <section class="card">
           <div class="card-header">
             <h2 class="card-title">${icon('cloud', 15)} GitHub Gist Cloud-Sync (Win 11 ↔ Pixel 9a)</h2>
-            <span class="pill ${store.secrets.lastSyncStatus === 'ok' ? 'kit' : store.secrets.lastSyncStatus === 'err' ? 'danger' : ''}">
-              ${store.secrets.lastSyncAt ? `Sync ${toTimeStr(new Date(store.secrets.lastSyncAt))}` : 'Lokal'}
-            </span>
+            <div class="row" style="gap:6px;">
+              <span class="pill">App v11</span>
+              <span class="pill ${store.secrets.lastSyncStatus === 'ok' ? 'kit' : store.secrets.lastSyncStatus === 'err' ? 'danger' : ''}">
+                ${store.secrets.lastSyncAt ? `Sync ${toTimeStr(new Date(store.secrets.lastSyncAt))}` : 'Lokal'}
+              </span>
+            </div>
           </div>
-          <div class="xs muted mono" style="margin:-4px 0 10px;">
-            Sync-Umfang: ${store.state.e.length} Zeiten · ${(store.state.checklist || []).length} Todos · ${(store.state.backlog || []).length} Rückstände · ${Object.keys(store.state.eventOverrides || {}).length} Ausfälle/Overrides · ${anki.totalDue} Ankis
-            ${store.secrets.lastSyncError ? `<span style="color:var(--danger);"> · Fehler: ${esc(store.secrets.lastSyncError)}</span>` : ''}
+          <div class="xs muted mono" style="margin:-4px 0 10px;line-height:1.6;">
+            <div><strong>Lokal:</strong> ${store.state.e.length} Zeiten · ${(store.state.checklist || []).length} Todos · ${(store.state.backlog || []).length} Rückstände · ${Object.keys(store.state.eventOverrides || {}).length} Ausfälle · ${anki.totalDue} Ankis</div>
+            ${store.secrets.lastRemoteSummary
+              ? `<div><strong>Cloud (Gist ${esc(store.secrets.lastRemoteSummary.gistIdShort || normalizeGistId(store.secrets.gistId).slice(0, 8))}…):</strong> ${store.secrets.lastRemoteSummary.e} Zeiten · ${store.secrets.lastRemoteSummary.chk} Todos · ${store.secrets.lastRemoteSummary.bl} Rückstände · ${store.secrets.lastRemoteSummary.ov} Ausfälle · ${store.secrets.lastRemoteSummary.anki} Ankis (${esc(store.secrets.lastRemoteSummary.action || 'Sync')})</div>`
+              : `<div><strong>Cloud:</strong> ${store.secrets.gistId ? `Gist ${esc(normalizeGistId(store.secrets.gistId).slice(0, 8))}… (noch nicht abgeglichen)` : 'Noch kein Gist verbunden'}</div>`}
           </div>
           <div class="field-grid" style="margin-bottom:10px;">
             <div class="field"><label>GitHub Token (Classic, Scope: <code>gist</code>)</label><input type="password" id="s-ghtoken" class="input mono" value="${esc(store.secrets.githubToken || '')}" placeholder="ghp_..." autocomplete="off" /></div>
@@ -224,11 +229,13 @@ export function renderMoreView(root, ctx) {
           <div class="row">
             <button class="btn btn-primary btn-sm" id="btn-save-gist">Speichern</button>
             <button class="btn btn-sm" id="btn-sync-now">${icon('refresh', 13)} Jetzt syncen</button>
-            <button class="btn btn-sm" id="btn-pull-gist">${icon('download', 13)} Cloud laden</button>
+            <button class="btn btn-sm" id="btn-push-gist" title="Überschreibt die Cloud direkt mit diesem Gerät">${icon('upload', 13)} Lokal → Cloud</button>
+            <button class="btn btn-sm" id="btn-pull-gist" title="Lädt den kompletten Stand aus der Cloud auf dieses Gerät">${icon('download', 13)} Cloud → Lokal</button>
             <button class="btn btn-sm" id="btn-create-gist">${icon('plus', 13)} Privaten Gist anlegen</button>
             <button class="btn btn-sm" id="btn-gist-archives">${icon('calendar', 13)} Wochen-Archive</button>
             <button class="btn btn-sm" id="btn-pair-qr">${icon('spark', 13)} Handy koppeln (QR)</button>
             <button class="btn btn-sm" id="btn-pair-paste">Mit Code koppeln</button>
+            <button class="btn btn-sm" id="btn-force-update" title="Leert nur den App-Cache (deine Daten bleiben 100 % erhalten)">App-Update erzwingen</button>
           </div>
           ${store.secrets.lastArchiveWeek ? `<div class="xs soft" style="margin-top:6px;">Letztes automatisches Wochen-Archiv: <span class="mono">${esc(store.secrets.lastArchiveWeek)}</span> (behält letzte 4 Wochen)</div>` : ''}
           ${store.secrets.lastSyncError ? `<div class="xs" style="color:var(--danger);margin-top:8px;">Fehler: ${esc(store.secrets.lastSyncError)}</div>` : ''}
@@ -376,13 +383,13 @@ export function renderMoreView(root, ctx) {
   });
 
   const saveGistInputs = () => {
-    store.secrets.githubToken = root.querySelector('#s-ghtoken').value.trim();
-    store.secrets.gistId = root.querySelector('#s-gistid').value.trim();
+    store.secrets.githubToken = root.querySelector('#s-ghtoken').value.replace(/\s+/g, '');
+    store.secrets.gistId = normalizeGistId(root.querySelector('#s-gistid').value);
     store.secrets.autoSync = root.querySelector('#s-autosync').checked;
-    store.saveSecrets();
+    store.saveSecrets({ silent: true });
   };
 
-  root.querySelector('#btn-save-gist')?.addEventListener('click', () => { saveGistInputs(); toast('Gespeichert.', 'ok'); });
+  root.querySelector('#btn-save-gist')?.addEventListener('click', () => { saveGistInputs(); renderMoreView(root, ctx); toast('Gespeichert.', 'ok'); });
   root.querySelector('#btn-create-gist')?.addEventListener('click', async () => {
     saveGistInputs();
     try {
@@ -397,15 +404,47 @@ export function renderMoreView(root, ctx) {
     saveGistInputs();
     const res = await syncNow();
     renderMoreView(root, ctx);
-    if (res.ok) toast('Synchronisiert.', 'ok');
-    else toast(`Fehler: ${res.error || res.reason}`, 'err');
+    if (res.ok) {
+      const s = res.summary || store.secrets.lastRemoteSummary;
+      toast(s ? `Sync OK · Cloud: ${s.chk} Todos · ${s.anki} Ankis` : 'Synchronisiert.', 'ok');
+    } else {
+      toast(`Fehler: ${res.error || res.reason}`, 'err');
+    }
+  });
+  root.querySelector('#btn-push-gist')?.addEventListener('click', async () => {
+    saveGistInputs();
+    const res = await pushToGist({ forceArchive: false });
+    renderMoreView(root, ctx);
+    if (res.ok) {
+      const s = res.summary || store.secrets.lastRemoteSummary;
+      toast(s ? `In Cloud hochgeladen: ${s.chk} Todos · ${s.anki} Ankis` : 'In Cloud hochgeladen.', 'ok');
+    } else {
+      toast(`Upload-Fehler: ${res.error || res.reason}`, 'err');
+    }
   });
   root.querySelector('#btn-pull-gist')?.addEventListener('click', async () => {
     saveGistInputs();
     const res = await pullFromGist({ preferRemote: true });
     renderMoreView(root, ctx);
-    if (res.ok) toast('Aus Cloud geladen.', 'ok');
-    else toast(`Fehler: ${res.error || res.reason}`, 'err');
+    if (res.ok) {
+      const s = res.summary || store.secrets.lastRemoteSummary;
+      toast(s ? `Aus Cloud geladen: ${s.chk} Todos · ${s.anki} Ankis` : 'Aus Cloud geladen.', 'ok');
+    } else {
+      toast(`Lade-Fehler: ${res.error || res.reason}`, 'err');
+    }
+  });
+  root.querySelector('#btn-force-update')?.addEventListener('click', async () => {
+    try {
+      if ('serviceWorker' in navigator) {
+        const regs = await navigator.serviceWorker.getRegistrations();
+        await Promise.all(regs.map((r) => r.unregister()));
+      }
+      if ('caches' in window) {
+        const keys = await caches.keys();
+        await Promise.all(keys.map((k) => caches.delete(k)));
+      }
+    } catch { /* ignore */ }
+    location.reload();
   });
 
   // Weekly Gist Archives Modal (#8)

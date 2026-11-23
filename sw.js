@@ -1,4 +1,4 @@
-const CACHE_NAME = 'kit-studyflow-v9';
+const CACHE_NAME = 'kit-studyflow-v11';
 const ASSETS = [
   './',
   './index.html',
@@ -24,7 +24,9 @@ const ASSETS = [
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => cache.addAll(ASSETS)).then(() => self.skipWaiting())
+    caches.open(CACHE_NAME)
+      .then((cache) => cache.addAll(ASSETS.map((u) => new Request(u, { cache: 'reload' }))))
+      .then(() => self.skipWaiting())
   );
 });
 
@@ -42,8 +44,9 @@ self.addEventListener('fetch', (event) => {
   if (url.origin !== self.location.origin) return;
   if (event.request.method !== 'GET') return;
 
+  // Always revalidate against network (bypasses GitHub Pages 10-min HTTP cache on PWA updates)
   event.respondWith(
-    fetch(event.request)
+    fetch(event.request, { cache: 'no-cache' })
       .then((res) => {
         if (res && res.status === 200) {
           const clone = res.clone();

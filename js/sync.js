@@ -31,22 +31,77 @@ export function onSyncStatusChange(fn) {
   return () => statusListeners.delete(fn);
 }
 
-function authHeaders(token) {
-  return {
-    Authorization: `Bearer ${token.trim()}`,
-    Accept: 'application/vnd.github+json',
-    'Content-Type': 'application/json'
+export function normalizeGistId(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return '';
+  // Allow users to paste full gist.github.com URLs cleanly
+  const m = /gist\.github\.com\/(?:[^/\s]+\/)?([a-f0-9]{16,64})/i.exec(s);
+  if (m) return m[1];
+  return s.replace(/\s+/g, '');
+}
+
+function cleanToken(raw) {
+  return String(raw || '').replace(/\s+/g, '');
+}
+
+function authHeaders(token, { withContentType = true } = {}) {
+  const h = {
+    Authorization: `Bearer ${cleanToken(token)}`,
+    Accept: 'application/vnd.github+json'
   };
+  if (withContentType) h['Content-Type'] = 'application/json';
+  return h;
 }
 
 export function isGistConfigured() {
-  return Boolean(store.secrets.githubToken && store.secrets.githubToken.trim().length > 10);
+  return Boolean(cleanToken(store.secrets.githubToken).length > 10);
 }
 
-function buildSyncPayload() {
+function summarizeStateCounts(sRaw) {
+  const s = sRaw || {};
+  const decks = Array.isArray(s.anki?.decks) ? s.anki.decks : [];
+  const deckDue = decks.reduce((sum, d) => sum + (Number(d?.due) || 0), 0);
+  const manualDue = (Number(s.anki?.manualNew) || 0) + (Number(s.anki?.manualLearn) || 0) + (Number(s.anki?.manualReview) || 0);
+  return {
+    e: Array.isArray(s.e) ? s.e.length : 0,
+    chk: Array.isArray(s.checklist) ? s.checklist.length : 0,
+    bl: Array.isArray(s.backlog) ? s.backlog.length : 0,
+    ov: s.eventOverrides ? Object.keys(s.eventOverrides).length : 0,
+    anki: deckDue || manualDue || (Number(s.anki?.manualDue) || 0)
+  };
+}
+
+function recordRemoteSummary(stateObj, gistId, action) {
+  const counts = summarizeStateCounts(stateObj);
+  store.secrets.lastRemoteSummary = {
+    ...counts,
+    gistIdShort: normalizeGistId(gistId).slice(0, 8),
+    syncedAt: Date.now(),
+    action
+  };
+}
+
+async function readHttpErrorDetail(res) {
+  let detail = '';
+  try {
+    const txt = await res.text();
+    try {
+      const j = JSON.parse(txt);
+      detail = j?.message || txt.slice(0, 140);
+    } catch {
+      detail = txt.slice(0, 140);
+    }
+  } catch { /* ignore */ }
+  return detail ? `HTTP ${res.status}: ${detail}` : `HTTP ${res.status}`;
+}
+
+function buildSyncPayload({ stripIcs = false } = {}) {
   const clone = JSON.parse(JSON.stringify(store.state));
   if (!clone.ai?.syncApiKeyInGist && clone.ai) {
     clone.ai.apiKey = '';
+  }
+  if (stripIcs) {
+    clone.icsRaw = '';
   }
   return clone;
 }
@@ -102,21 +157,22 @@ export function mergeStates(localRaw, remoteRaw) {
   const mergeMutableById = (localList = [], remoteList = []) => {
     const map = new Map();
     const put = (item, isRemote) => {
-      if (!item || !item.id) return;
-      const key = String(item.id);
+      if (!item) return;
+      const key = item.id ? String(item.id) : `${item.d || ''}|${item.title || item.text || ''}`;
+      if (!key || key === '|') return;
       if (isDeleted(key, item.updatedAt || 0)) return;
       const prev = map.get(key);
       if (!prev) {
-        map.set(key, { ...item });
+        map.set(key, { ...item, id: item.id || key });
         return;
       }
       const prevTs = prev.updatedAt || 0;
       const curTs = item.updatedAt || 0;
       if (curTs > prevTs) {
-        map.set(key, { ...item });
+        map.set(key, { ...item, id: item.id || key });
       } else if (curTs === prevTs) {
         // Same timestamp tie-breaker: prefer completed checkmarks & primary device
-        const winner = isRemote === remoteNewer ? { ...item } : { ...prev };
+        const winner = isRemote === remoteNewer ? { ...item, id: item.id || key } : { ...prev };
         if (prev.done || item.done) winner.done = Boolean(prev.done || item.done);
         map.set(key, winner);
       }
@@ -255,6 +311,7 @@ export function mergeStates(localRaw, remoteRaw) {
     lectureAttendance: mergeTimestampedMap('lectureAttendance'),
     eventOverrides: mergeTimestampedMap('eventOverrides'),
     restDays: mergeTimestampedMap('restDays'),
+    ankiDoneDays: mergeTimestampedMap('ankiDoneDays'),
     autopilotHandled: mergeMap(secondary.autopilotHandled, primary.autopilotHandled),
     dayNotes: mergeTimestampedMap('dayNotes'),
     mapMeta: mergedMapMeta,
@@ -277,10 +334,11 @@ export function mergeStates(localRaw, remoteRaw) {
 }
 
 export async function createPrivateGist() {
-  const token = store.secrets.githubToken.trim();
+  const token = cleanToken(store.secrets.githubToken);
   if (!token) throw new Error('Bitte zuerst deinen GitHub Token eintragen.');
 
   setSyncStatus('syncing', '');
+  const payload = buildSyncPayload();
   const res = await fetch('https://api.github.com/gists', {
     method: 'POST',
     cache: 'no-store',
@@ -290,30 +348,32 @@ export async function createPrivateGist() {
       public: false,
       files: {
         [STATE_FILENAME]: {
-          content: JSON.stringify(buildSyncPayload(), null, 2)
+          content: JSON.stringify(payload)
         }
       }
     })
   });
 
   if (!res.ok) {
-    const err = await res.text();
-    setSyncStatus('err', `GitHub Fehler ${res.status}`);
-    throw new Error(`Gist konnte nicht erstellt werden (${res.status}): ${err.slice(0, 140)}`);
+    const detail = await readHttpErrorDetail(res);
+    setSyncStatus('err', detail);
+    throw new Error(`Gist konnte nicht erstellt werden (${detail})`);
   }
 
   const data = await res.json();
   store.secrets.gistId = data.id;
   store.secrets.lastSyncAt = Date.now();
   pendingLocalChange = false;
+  recordRemoteSummary(payload, data.id, 'Gist erstellt');
   setSyncStatus('ok', '');
   return data.id;
 }
 
 export async function pushToGist({ forceArchive = false, keepalive = false } = {}) {
   if (!isGistConfigured()) return { ok: false, reason: 'not_configured' };
-  const token = store.secrets.githubToken.trim();
-  let gistId = (store.secrets.gistId || '').trim();
+  const token = cleanToken(store.secrets.githubToken);
+  let gistId = normalizeGistId(store.secrets.gistId);
+  if (gistId && gistId !== store.secrets.gistId) store.secrets.gistId = gistId;
 
   if (!gistId) {
     gistId = await createPrivateGist();
@@ -325,7 +385,8 @@ export async function pushToGist({ forceArchive = false, keepalive = false } = {
   setSyncStatus('syncing', '');
 
   try {
-    const payloadStr = JSON.stringify(buildSyncPayload(), null, 2);
+    const payloadObj = buildSyncPayload();
+    const payloadStr = JSON.stringify(payloadObj);
     const weekKey = getIsoWeekKey();
     const shouldWriteArchive = !keepalive && (forceArchive || store.secrets.lastArchiveWeek !== weekKey);
     const filesBody = {
@@ -333,7 +394,10 @@ export async function pushToGist({ forceArchive = false, keepalive = false } = {
     };
 
     if (shouldWriteArchive) {
-      filesBody[`${ARCHIVE_PREFIX}${weekKey}.json`] = { content: payloadStr };
+      // Strip bulky raw ICS from weekly archive snapshots to keep PATCH small & reliable on mobile
+      filesBody[`${ARCHIVE_PREFIX}${weekKey}.json`] = {
+        content: JSON.stringify(buildSyncPayload({ stripIcs: true }))
+      };
     }
 
     const bodyStr = JSON.stringify({ files: filesBody });
@@ -347,7 +411,7 @@ export async function pushToGist({ forceArchive = false, keepalive = false } = {
       headers: authHeaders(token),
       body: bodyStr
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!res.ok) throw new Error(await readHttpErrorDetail(res));
 
     // Prune archives beyond the newest MAX_WEEKLY_ARCHIVES (4 weeks)
     if (shouldWriteArchive) {
@@ -374,8 +438,9 @@ export async function pushToGist({ forceArchive = false, keepalive = false } = {
 
     pendingLocalChange = false;
     store.secrets.lastSyncAt = Date.now();
+    recordRemoteSummary(payloadObj, gistId, 'Hochgeladen');
     setSyncStatus('ok', '');
-    return { ok: true, gistId, archivedWeek: shouldWriteArchive ? weekKey : '' };
+    return { ok: true, gistId, archivedWeek: shouldWriteArchive ? weekKey : '', summary: store.secrets.lastRemoteSummary };
   } catch (err) {
     setSyncStatus('err', err.message);
     return { ok: false, error: err.message };
@@ -385,14 +450,15 @@ export async function pushToGist({ forceArchive = false, keepalive = false } = {
 }
 
 export async function listGistArchives() {
-  if (!isGistConfigured() || !store.secrets.gistId) {
+  const gistId = normalizeGistId(store.secrets.gistId);
+  if (!isGistConfigured() || !gistId) {
     throw new Error('Kein privater GitHub Gist verbunden.');
   }
   const res = await fetch(
-    `https://api.github.com/gists/${encodeURIComponent(store.secrets.gistId.trim())}`,
-    { cache: 'no-store', headers: authHeaders(store.secrets.githubToken) }
+    `https://api.github.com/gists/${encodeURIComponent(gistId)}?_t=${Date.now()}`,
+    { cache: 'no-store', headers: authHeaders(store.secrets.githubToken, { withContentType: false }) }
   );
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (!res.ok) throw new Error(await readHttpErrorDetail(res));
   const gist = await res.json();
   const files = gist.files || {};
   return Object.keys(files)
@@ -430,7 +496,9 @@ async function readGistFileContent(fileObj) {
 }
 
 export async function pullFromGist({ preferRemote = false } = {}) {
-  if (!isGistConfigured() || !store.secrets.gistId) {
+  const gistId = normalizeGistId(store.secrets.gistId);
+  if (gistId && gistId !== store.secrets.gistId) store.secrets.gistId = gistId;
+  if (!isGistConfigured() || !gistId) {
     return { ok: false, reason: 'not_configured' };
   }
   if (isSyncing) return { ok: false, reason: 'busy' };
@@ -439,10 +507,10 @@ export async function pullFromGist({ preferRemote = false } = {}) {
 
   try {
     const res = await fetch(
-      `https://api.github.com/gists/${encodeURIComponent(store.secrets.gistId.trim())}`,
-      { cache: 'no-store', headers: authHeaders(store.secrets.githubToken) }
+      `https://api.github.com/gists/${encodeURIComponent(gistId)}?_t=${Date.now()}`,
+      { cache: 'no-store', headers: authHeaders(store.secrets.githubToken, { withContentType: false }) }
     );
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!res.ok) throw new Error(await readHttpErrorDetail(res));
     const gist = await res.json();
     const files = gist.files || {};
 
@@ -453,6 +521,7 @@ export async function pullFromGist({ preferRemote = false } = {}) {
     const stateContent = await readGistFileContent(files[STATE_FILENAME]);
     if (stateContent) {
       const remoteState = JSON.parse(stateContent);
+      recordRemoteSummary(remoteState, gistId, preferRemote ? 'Aus Cloud geladen' : 'Abgeglichen');
       if (preferRemote) {
         const localKey = store.state.ai?.apiKey || '';
         const next = store._mergeDefaults(remoteState);
@@ -476,19 +545,22 @@ export async function pullFromGist({ preferRemote = false } = {}) {
           store.save({ skipSync: true, preserveTimestamp: true });
         }
       }
+    } else {
+      // Gist exists (e.g. only kit-calendar.ics from GitHub Action), but has no state JSON yet -> push local state!
+      needsPushBack = true;
     }
 
     const remoteIcs = await readGistFileContent(files[ICS_FILENAME]);
     if (remoteIcs) {
       if (remoteIcs !== store.state.icsRaw && remoteIcs.includes('BEGIN:VEVENT')) {
-        syncModulesFromIcs(store, remoteIcs);
+        syncModulesFromIcs(store, remoteIcs, { skipSync: true });
         updatedIcs = true;
       }
     }
 
     store.secrets.lastSyncAt = Date.now();
     setSyncStatus('ok', '');
-    return { ok: true, updatedState, updatedIcs, needsPushBack };
+    return { ok: true, updatedState, updatedIcs, needsPushBack, summary: store.secrets.lastRemoteSummary };
   } catch (err) {
     setSyncStatus('err', err.message);
     return { ok: false, error: err.message };
@@ -499,9 +571,10 @@ export async function pullFromGist({ preferRemote = false } = {}) {
 
 export async function syncNow() {
   if (!isGistConfigured()) return { ok: false, error: 'Kein GitHub Token hinterlegt.' };
-  if (!store.secrets.gistId) {
+  const gistId = normalizeGistId(store.secrets.gistId);
+  if (!gistId) {
     const id = await createPrivateGist();
-    return { ok: true, created: true, gistId: id };
+    return { ok: true, created: true, gistId: id, summary: store.secrets.lastRemoteSummary };
   }
   if (isSyncing) {
     syncQueued = true;
@@ -512,10 +585,10 @@ export async function syncNow() {
   if (pulled.ok && (pulled.needsPushBack || pendingLocalChange)) {
     const pushed = await pushToGist();
     result = pushed.ok
-      ? { ok: true, merged: true, pushed: true, updatedState: pulled.updatedState, updatedIcs: pulled.updatedIcs }
+      ? { ok: true, merged: true, pushed: true, updatedState: pulled.updatedState, updatedIcs: pulled.updatedIcs, summary: pushed.summary }
       : pushed;
   } else if (pulled.ok) {
-    result = { ok: true, merged: true, updatedState: pulled.updatedState, updatedIcs: pulled.updatedIcs };
+    result = { ok: true, merged: true, updatedState: pulled.updatedState, updatedIcs: pulled.updatedIcs, summary: pulled.summary };
   }
 
   // Drain any edit that arrived while this sync was in flight so nothing is EVER dropped!

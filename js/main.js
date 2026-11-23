@@ -143,7 +143,11 @@ function promptLogFromChecklist(item) {
     </div>
     <div class="small" style="font-weight:620;margin-bottom:4px;">${escHtml(item.title)}</div>
     <div class="xs muted" style="margin-bottom:12px;">
-      ${item.estMin > 0 ? `Plan-Schätzung war ~${item.estMin} min — trage deine echte Dauer ein (wird nicht blind übernommen).` : 'Trage ein, wie viele Minuten du wirklich dafür gebraucht hast.'}
+      ${item.isAnkiDaily
+        ? `Du musst nicht alle Karten schaffen — trage ein, wie viele Minuten Anki du heute gemacht hast${item.remainingCards > 0 ? ` (${item.remainingCards} Karten bleiben einfach für später/morgen)` : ''}.`
+        : item.estMin > 0
+          ? `Plan-Schätzung war ~${item.estMin} min — trage deine echte Dauer ein (wird nicht blind übernommen).`
+          : 'Trage ein, wie viele Minuten du wirklich dafür gebraucht hast.'}
     </div>
     <form id="qlm-form" class="stack">
       <div class="row-between" style="gap:8px;">
@@ -187,7 +191,7 @@ function promptLogFromChecklist(item) {
       </div>
 
       <div class="row-between" style="margin-top:4px;">
-        <button type="button" class="btn btn-sm" id="qlm-skip">Ohne Zeit abhaken</button>
+        <button type="button" class="btn btn-sm" id="qlm-skip">${item.isAnkiDaily && item.alreadyLoggedMin > 0 ? `Ohne neue Zeit (${item.alreadyLoggedMin} min behalten)` : 'Ohne Zeit abhaken'}</button>
         <button type="submit" class="btn btn-primary btn-sm" id="qlm-save">${icon('check', 13)} Zeit speichern</button>
       </div>
     </form>
@@ -318,18 +322,24 @@ function promptLogFromChecklist(item) {
 
 async function applyPairingObject(obj) {
   if (!obj || typeof obj !== 'object') throw new Error('Ungültige Kopplungsdaten.');
-  if (obj.gt) store.secrets.githubToken = obj.gt;
-  if (obj.gid) store.secrets.gistId = obj.gid;
+  if (obj.gt) store.secrets.githubToken = String(obj.gt).replace(/\s+/g, '');
+  if (obj.gid) store.secrets.gistId = String(obj.gid).trim();
   store.secrets.autoSync = true;
-  store.saveSecrets();
+  store.saveSecrets({ silent: true });
   if (obj.ak) {
-    store.state.ai.apiKey = obj.ak;
-    store.save({ skipSync: true });
+    store.state.ai.apiKey = String(obj.ak).replace(/\s+/g, '');
+    store.save({ skipSync: true, preserveTimestamp: true });
   }
   toast('Gerät gekoppelt! Lade Cloud-Daten...', 'ok');
   if (store.secrets.githubToken && store.secrets.gistId) {
-    const res = await pullFromGist({ preferRemote: false });
-    if (res.ok) toast('Cloud-Sync auf diesem Gerät aktiv!', 'ok');
+    const isFreshDevice = store.state.e.length === 0 && (store.state.checklist || []).length === 0;
+    const res = await pullFromGist({ preferRemote: isFreshDevice });
+    if (res.ok) {
+      const s = res.summary || store.secrets.lastRemoteSummary;
+      toast(s ? `Gekoppelt! Geladen: ${s.chk} Todos · ${s.anki} Ankis` : 'Cloud-Sync auf diesem Gerät aktiv!', 'ok');
+    } else {
+      toast(`Kopplung ok, aber Cloud-Laden fehlgeschlagen: ${res.error || res.reason}`, 'err');
+    }
   }
 }
 
@@ -502,8 +512,13 @@ document.getElementById('theme-toggle-mobile')?.addEventListener('click', cycleT
   document.getElementById(id)?.addEventListener('click', async () => {
     if (!isGistConfigured()) { navigate('more', { subtab: 'settings' }); return; }
     const res = await syncNow();
-    if (res.ok) toast('Mit GitHub Gist synchronisiert.', 'ok');
-    else toast(`Sync-Fehler: ${res.error || res.reason}`, 'err');
+    if (res.ok) {
+      const s = res.summary || store.secrets.lastRemoteSummary;
+      const info = s ? ` (Gist: ${s.chk} Todos · ${s.anki} Ankis)` : '';
+      toast(`Sync OK${info}`, 'ok');
+    } else {
+      toast(`Sync-Fehler: ${res.error || res.reason}`, 'err');
+    }
   });
 });
 
@@ -563,9 +578,15 @@ async function backgroundSync({ showToast = false } = {}) {
     const res = await syncNow();
     if (showToast && res.ok && (res.updatedState || res.updatedIcs)) {
       toast(res.updatedIcs ? 'KIT-Kalender & Cloud-Daten aktualisiert.' : 'Cloud-Daten synchronisiert.', 'ok');
+    } else if (showToast && !res.ok && res.error) {
+      toast(`Cloud-Sync fehlgeschlagen: ${res.error}`, 'err');
     }
   }
 }
+
+let swReg = null;
+const hadSwController = Boolean('serviceWorker' in navigator && navigator.serviceWorker.controller);
+let swReloading = false;
 
 // Periodic background sync every 45s while app is open (keeps Laptop <-> Pixel 9a in sync without re-rendering if unchanged)
 setInterval(() => {
@@ -580,6 +601,7 @@ document.addEventListener('visibilitychange', () => {
   } else if (document.visibilityState === 'visible') {
     const exp = store.checkExpiredTimer();
     if (exp) toast(exp.message, 'ok');
+    if (swReg) swReg.update().catch(() => {});
     backgroundSync({ showToast: true });
   }
 });
@@ -589,7 +611,18 @@ window.addEventListener('pagehide', () => {
 });
 
 if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1')) {
-  navigator.serviceWorker.register('./sw.js').catch(() => {});
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (hadSwController && !swReloading) {
+      swReloading = true;
+      location.reload();
+    }
+  });
+  navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' })
+    .then((reg) => {
+      swReg = reg;
+      reg.update().catch(() => {});
+    })
+    .catch(() => {});
 }
 
 applyTheme(store.state.theme || 'dark');

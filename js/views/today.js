@@ -88,15 +88,16 @@ export function renderTodayView(root, ctx) {
   const anki = getAnkiLoadSummary();
   const minDailyAnki = Math.max(10, Number(store.state.anki.minDailyAnkiMin) || 30);
   const ankiSyncedToday = Boolean(anki.lastSyncAt && toDateStr(new Date(anki.lastSyncAt)) === today);
-  const ankiDoneToday = anki.totalDue === 0 && day.a > 0;
+  const ankiDoneToday = store.isAnkiDoneDay(today, anki.totalDue);
   const timerStatus = store.getTimerStatus();
   const ui = store.state.ui;
   if (timerStatus) ui.tdt = true;
 
-  // Today's checklist & lectures
+  // Today's checklist & lectures (includes dynamic daily Anki check-off)
   const todayItems = getChecklistForDay(today);
-  const doneCount = todayItems.filter((x) => x.done).length;
-  const checkPct = todayItems.length ? Math.round((doneCount / todayItems.length) * 100) : 0;
+  const doneCount = todayItems.filter((x) => x.done).length + (ankiDoneToday ? 1 : 0);
+  const totalCheckCount = todayItems.length + 1;
+  const checkPct = totalCheckCount ? Math.round((doneCount / totalCheckCount) * 100) : 0;
   const yesterdayOpen = getUnfinishedFromYesterday(today);
   const tomorrowItems = getChecklistForDay(tomorrow);
 
@@ -172,11 +173,11 @@ export function renderTodayView(root, ctx) {
             ${dayNote ? `<span class="day-divider-meta">| ${esc(dayNote)}</span>` : ''}
           </div>
           <div class="row" style="gap:8px;">
-            <span class="pill ${doneCount === todayItems.length && todayItems.length > 0 ? 'kit' : ''}">${doneCount} / ${todayItems.length} erledigt</span>
+            <span class="pill ${doneCount === totalCheckCount && totalCheckCount > 0 ? 'kit' : ''}">${doneCount} / ${totalCheckCount} erledigt</span>
           </div>
         </div>
 
-        ${todayItems.length ? `
+        ${totalCheckCount ? `
           <div class="progress-track" style="margin-bottom:12px;">
             <div class="progress-fill green" style="width:${checkPct}%;"></div>
           </div>
@@ -189,28 +190,31 @@ export function renderTodayView(root, ctx) {
           </div>
         ` : ''}
 
-        <!-- Dynamic Daily Anki Row (auto-calculated from daily Anki sync, no static AI Anki todos needed) -->
-        <div class="entry-row" style="margin-bottom:8px;padding:8px 11px;border-color:${ankiDoneToday ? 'rgba(16,185,129,0.3)' : 'rgba(244,114,182,0.28)'};">
-          <div style="min-width:0;">
-            <div class="row" style="gap:6px;">
-              <span class="pill anki">Anki heute</span>
-              <span class="small" style="font-weight:600;">
-                ${anki.totalDue > 0
-                  ? `${anki.totalDue} fällige Karten → ~${anki.estMinutes} min`
-                  : ankiDoneToday
-                    ? `Erledigt (${fmtMin(day.a)} geloggt)`
-                    : (ankiSyncedToday ? '0 fällige Karten' : `Noch kein Sync heute (Puffer ~${minDailyAnki} min)`)}
-              </span>
-            </div>
-            <div class="xs muted mono" style="margin-top:3px;">
-              <span class="anki-dot blue"></span>${anki.totalNew} · <span class="anki-dot red"></span>${anki.totalLearn} · <span class="anki-dot green"></span>${anki.totalReview}
-              ${day.a > 0 ? ` · heute geloggt: ${fmtMin(day.a)}` : ''}
-              ${anki.lastSyncAt ? ` · Sync ${toTimeStr(new Date(anki.lastSyncAt))}` : ''}
+        <!-- Dynamic Daily Anki Check-off Row (partial progress OK — user decides when done for today!) -->
+        <div class="check-item ${ankiDoneToday ? 'done' : ''}" style="margin-bottom:8px;background:var(--bg-soft);border-color:${ankiDoneToday ? 'rgba(16,185,129,0.3)' : 'rgba(244,114,182,0.28)'};">
+          <div class="check-item-main" id="anki-row-toggle" title="Anki für heute abhaken (auch wenn noch Karten übrig sind)">
+            <span class="check-box">${ankiDoneToday ? icon('check', 12) : ''}</span>
+            <div style="min-width:0;flex:1;">
+              <div class="row" style="gap:6px;">
+                <span class="pill anki">Anki heute</span>
+                <span class="check-text" style="font-size:0.88rem;">
+                  ${ankiDoneToday
+                    ? `Für heute erledigt${day.a > 0 ? ` (${fmtMin(day.a)} geloggt)` : ''}${anki.totalDue > 0 ? ` · ${anki.totalDue} Karten für später` : ''}`
+                    : anki.totalDue > 0
+                      ? `${anki.totalDue} fällige Karten (alle ~${anki.estMinutes} min · Teilpensum ok)`
+                      : (ankiSyncedToday ? '0 fällige Karten' : `Noch kein Sync heute (Puffer ~${minDailyAnki} min)`)}
+                </span>
+              </div>
+              <div class="xs muted mono" style="margin-top:3px;">
+                <span class="anki-dot blue"></span>${anki.totalNew} · <span class="anki-dot red"></span>${anki.totalLearn} · <span class="anki-dot green"></span>${anki.totalReview}
+                ${day.a > 0 ? ` · heute geloggt: ${fmtMin(day.a)}` : ''}
+                ${anki.lastSyncAt ? ` · Sync ${toTimeStr(new Date(anki.lastSyncAt))}` : ''}
+              </div>
             </div>
           </div>
-          <div class="row" style="gap:5px;flex-wrap:nowrap;">
+          <div class="check-actions">
             <button class="btn btn-xs" id="btn-anki-row-sync" title="AnkiConnect jetzt abfragen">${icon('refresh', 12)} Sync</button>
-            <button class="btn btn-xs btn-primary" id="btn-anki-row-log" title="Echte Anki-Zeit eintragen">${icon('check', 12)} Loggen</button>
+            <button class="btn btn-xs" id="btn-anki-row-log" title="Zwischenzeit loggen (ohne für heute abzuhaken)">+ Zeit</button>
           </div>
         </div>
 
@@ -783,14 +787,35 @@ export function renderTodayView(root, ctx) {
   };
   root.querySelector('#btn-anki-sync')?.addEventListener('click', triggerAnkiSync);
   root.querySelector('#btn-anki-row-sync')?.addEventListener('click', triggerAnkiSync);
+  root.querySelector('#anki-row-toggle')?.addEventListener('click', () => {
+    const nextDone = !ankiDoneToday;
+    store.setAnkiDoneDay(today, nextDone);
+    if (nextDone && promptLogFromChecklist) {
+      promptLogFromChecklist({
+        id: 'anki_daily',
+        title: 'Anki für heute abhaken',
+        kind: 'a',
+        estMin: 0,
+        done: true,
+        isAnkiDaily: true,
+        remainingCards: anki.totalDue,
+        alreadyLoggedMin: day.a
+      });
+    } else if (!nextDone) {
+      toast('Anki für heute wieder geöffnet.');
+    }
+  });
   root.querySelector('#btn-anki-row-log')?.addEventListener('click', () => {
     if (promptLogFromChecklist) {
       promptLogFromChecklist({
-        id: 'anki_daily',
-        title: `Heutige Anki-Reviews (${anki.totalDue} Karten)`,
+        id: 'anki_session',
+        title: 'Anki-Zwischenzeit loggen',
         kind: 'a',
-        estMin: anki.estMinutes || minDailyAnki,
-        done: true
+        estMin: 0,
+        done: true,
+        isAnkiDaily: true,
+        remainingCards: anki.totalDue,
+        alreadyLoggedMin: day.a
       });
     }
   });

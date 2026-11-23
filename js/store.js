@@ -124,6 +124,7 @@ export function createDefaultState() {
     lectureAttendance: {}, // { [uid]: 'attended' | 'skipped' }
     eventOverrides: {},    // { [uid]: 'lecture' | 'exercise' | 'cancelled' }
     restDays: {},          // { 'YYYY-MM-DD': true } manual rest days protecting streak (#1)
+    ankiDoneDays: {},      // { 'YYYY-MM-DD': true|false } manual daily Anki check-off (even when cards remain)
     autopilotHandled: {},  // { [uid]: timestamp } already accepted or dismissed autopilot suggestions
     mapMeta: {},           // { [mapName]: { [key]: timestamp } } per-key conflict resolution for Gist sync
     deletedIds: {},        // { [id]: timestamp } tombstones for conflict-safe 2-way Gist merge
@@ -182,7 +183,8 @@ export function createDefaultSecrets() {
     lastSyncAt: 0,
     lastSyncStatus: 'local', // 'local' | 'ok' | 'syncing' | 'err'
     lastSyncError: '',
-    lastArchiveWeek: ''      // e.g. '2026-KW48' for weekly Gist snapshots (#8)
+    lastArchiveWeek: '',     // e.g. '2026-KW48' for weekly Gist snapshots (#8)
+    lastRemoteSummary: null  // { gistIdShort, e, chk, bl, ov, anki, syncedAt, action }
   };
 }
 
@@ -256,6 +258,7 @@ class Store {
       lectureAttendance: { ...(data.lectureAttendance || {}) },
       eventOverrides: { ...(data.eventOverrides || {}) },
       restDays: { ...(data.restDays || {}) },
+      ankiDoneDays: { ...(data.ankiDoneDays || {}) },
       autopilotHandled: { ...(data.autopilotHandled || {}) },
       mapMeta: JSON.parse(JSON.stringify(data.mapMeta || {})),
       deletedIds: { ...(data.deletedIds || {}) },
@@ -774,6 +777,21 @@ class Store {
     this.touchMapKey('restDays', dStr);
     this.save();
     return next;
+  }
+
+  isAnkiDoneDay(dStr = toDateStr(), totalDue = null) {
+    const explicit = this.state.ankiDoneDays?.[dStr];
+    if (explicit !== undefined) return Boolean(explicit);
+    if (totalDue === 0 && this.getDayBreakdown(dStr).a > 0) return true;
+    return false;
+  }
+
+  setAnkiDoneDay(dStr = toDateStr(), done = true) {
+    if (!this.state.ankiDoneDays) this.state.ankiDoneDays = {};
+    this.state.ankiDoneDays[dStr] = Boolean(done);
+    this.touchMapKey('ankiDoneDays', dStr);
+    this.save();
+    return Boolean(done);
   }
 
   getGoalForDay(dStr = toDateStr()) {

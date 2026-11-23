@@ -279,7 +279,7 @@ export function expandIcsEventsInRange(icsText, startDateStr, endDateStr) {
   return instances.sort((a, b) => (a.d + a.start).localeCompare(b.d + b.start));
 }
 
-export function syncModulesFromIcs(store, icsText) {
+export function syncModulesFromIcs(store, icsText, { skipSync = false } = {}) {
   const events = parseIcsEvents(icsText);
   let added = 0;
   for (const ev of events) {
@@ -302,11 +302,12 @@ export function syncModulesFromIcs(store, icsText) {
         ankiDeck: '',
         notes: ''
       };
+      store.touchMapKey('modules', meta.moduleId);
       added++;
     }
   }
   store.state.icsRaw = icsText;
   store.state.icsUpdatedAt = Date.now();
-  store.save();
+  store.save({ skipSync, preserveTimestamp: skipSync });
   return { totalEvents: events.length, modulesAdded: added };
 }

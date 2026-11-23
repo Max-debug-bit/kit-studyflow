@@ -49,9 +49,12 @@ export function buildPlanningContext(weekOffset = 0) {
   const todayBreak = store.getDayBreakdown(todayStr);
   const minDailyAnki = Math.max(10, Number(store.state.anki.minDailyAnkiMin) || 30);
   const ankiSyncedToday = Boolean(anki.lastSyncAt && toDateStr(new Date(anki.lastSyncAt)) === todayStr);
-  const todayAnkiRemainingMin = anki.totalDue > 0
-    ? anki.estMinutes
-    : (todayBreak.a > 0 || ankiSyncedToday ? 0 : minDailyAnki);
+  const ankiDoneToday = store.isAnkiDoneDay(todayStr, anki.totalDue);
+  const todayAnkiRemainingMin = ankiDoneToday
+    ? 0
+    : (anki.totalDue > 0
+        ? Math.max(0, Math.min(anki.estMinutes, Math.max(minDailyAnki, anki.estMinutes)) - todayBreak.a)
+        : (todayBreak.a > 0 || ankiSyncedToday ? 0 : minDailyAnki));
 
   const prefs = store.state.planningPrefs || {};
   const defaultWakeFreeDay = prefs.defaultWakeFreeDay || '10:00';
@@ -184,16 +187,18 @@ export function buildPlanningContext(weekOffset = 0) {
     ankiStatus: {
       quelle: anki.source,
       letzterSyncHeute: ankiSyncedToday,
+      ankiFuerHeuteAbgehakt: ankiDoneToday,
       heuteBereitsGeloeggtMin: todayBreak.a,
       neueKartenBlau: anki.totalNew,
       lernKartenRot: anki.totalLearn,
       faelligeKartenGruen: anki.totalReview,
       faelligeKartenGesamt: anki.totalDue,
       gewichteSekunden: anki.weights,
+      alleFaelligenKartenMin: anki.estMinutes,
       heuteNochOffenBerechnetMin: todayAnkiRemainingMin,
       taeglicherZeitpufferFolgetageMin: minDailyAnki,
       aktiveDecks: (anki.decks || []).filter((d) => (d.due || 0) > 0),
-      planungsRegel: 'Tägliche Anki-Reviews werden NICHT als normale Todo-Punkte in items geplant, da die App sie jeden Tag automatisch aus dem neuen Anki-Sync berechnet! Reserviere die Anki-Zeit aber ZWINGEND im Tagesbudget (heute: heuteNochOffenBerechnetMin; Folgetage: taeglicherZeitpufferFolgetageMin).'
+      planungsRegel: 'Tägliche Anki-Reviews werden NICHT als normale Todo-Punkte in items geplant. Wichtig: Der Student macht NICHT zwingend jeden Tag ALLE fälligen Karten! Wenn ankiFuerHeuteAbgehakt === true, sind heute 0 Min. Anki mehr offen (egal wie viele Karten noch in Anki liegen). Sonst ein realistisches Tagespensum im Budget reservieren (orientiert an taeglicherZeitpufferFolgetageMin bzw. alleFaelligenKartenMin wenn kleiner).'
     },
     modulRegeln: moduleRules,
     uniTermineDieseWoche: weekUni,
@@ -225,9 +230,10 @@ Halte dich strikt an diese 6 Regeln und nutze jedes Feld aus dem JSON-Kontext ge
      * "fokus": hohes Pensum (~4–6 h an freien Tagen, ~2–3,5 h an Uni-Tagen).
 
 3. ANKI-ZEITBUDGET (DYNAMISCH ÜBER TÄGLICHEN ANKI-SYNC – SEHR WICHTIG!):
-   - Plane KEINE eigenen „Anki-Reviews“-Checklisten-Punkte ("kind": "a") in "items"! Die App berechnet jeden Tag automatisch nach dem neuen Anki-Sync die echte fällige Anki-Zeit aus Blau (Neu), Rot (Lernen) und Grün (Fällig) und zeigt sie dynamisch oben auf „Heute“ an.
-   - ABER reserviere die Anki-Zeit ZWINGEND im täglichen Zeitbudget, damit kein Tag überplant wird:
-     * HEUTE: Ziehe exakt "ankiStatus.heuteNochOffenBerechnetMin" vom verfügbaren Zeitbudget ab (bei vielen blauen/roten Karten heute entsprechend weniger andere schwere Blöcke einplanen!).
+   - Plane KEINE eigenen „Anki-Reviews“-Checklisten-Punkte ("kind": "a") in "items"! Die App zeigt Anki dynamisch oben auf „Heute“ mit eigenem Abhaken an.
+   - Wichtig: Der Student macht NICHT jeden Tag zwingend alle fälligen Anki-Karten (bei großem Rückstau macht er oft nur ein realistisches Tagespensum und hakt Anki für heute ab).
+   - Reserviere die Anki-Zeit dennoch ZWINGEND im täglichen Zeitbudget, damit kein Tag überplant wird:
+     * HEUTE: Wenn "ankiStatus.ankiFuerHeuteAbgehakt" true ist → 0 Min. mehr für heute reservieren (auch wenn noch Karten in Anki liegen!). Wenn false → realistisches Budget reservieren (orientiert an "taeglicherZeitpufferFolgetageMin" bzw. "alleFaelligenKartenMin", falls kleiner).
      * FOLGETAGE (Di–So): Ziehe pauschal "ankiStatus.taeglicherZeitpufferFolgetageMin" (z. B. 30 Min.) pro Tag als Zeitpuffer vom Tagesbudget ab.
      * Nenne in deiner kurzen Erklärung vor dem JSON explizit, wie viel Anki-Zeit du heute und an den Folgetagen im Budget reserviert hast!
    - Hinweis: Das *Erstellen* neuer Anki-Karten nach einer Vorlesung (z. B. „WK: VL nacharbeiten + Ankis erstellen“) bleibt ein normaler Lern-Punkt ("kind": "l") – nur das tägliche *Durchgehen* der fälligen Reviews läuft dynamisch über den Anki-Sync.
