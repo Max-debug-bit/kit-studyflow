@@ -26,12 +26,13 @@ export const AVAILABLE_MODELS = [
   { id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash (Empfohlen · Free Tier)' },
   { id: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash (Schnell · Free Tier)' },
   { id: 'gemini-3.5-flash-lite', label: 'Gemini 3.5 Flash Lite (Ultra-schnell)' },
+  { id: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash (Stabil · Free Tier)' },
   { id: 'gemini-flash-latest', label: 'Gemini Flash Latest (Auto)' },
   { id: 'gemini-pro-latest', label: 'Gemini Pro Latest (Starkes Reasoning)' },
   { id: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro Preview' }
 ];
 
-const FALLBACK_CHAIN = ['gemini-3.8-flash', 'gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-flash-latest'];
+const FALLBACK_CHAIN = ['gemini-3.8-flash', 'gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-2.5-flash', 'gemini-flash-latest'];
 
 export function buildPlanningContext(weekOffset = 0) {
   const now = new Date();
@@ -47,7 +48,10 @@ export function buildPlanningContext(weekOffset = 0) {
   const anki = getAnkiLoadSummary();
   const todayBreak = store.getDayBreakdown(todayStr);
   const minDailyAnki = Math.max(10, Number(store.state.anki.minDailyAnkiMin) || 30);
-  const effectiveAnkiMin = anki.estMinutes > 0 ? Math.max(minDailyAnki, anki.estMinutes) : minDailyAnki;
+  const ankiSyncedToday = Boolean(anki.lastSyncAt && toDateStr(new Date(anki.lastSyncAt)) === todayStr);
+  const todayAnkiRemainingMin = anki.totalDue > 0
+    ? anki.estMinutes
+    : (todayBreak.a > 0 || ankiSyncedToday ? 0 : minDailyAnki);
 
   const prefs = store.state.planningPrefs || {};
   const defaultWakeFreeDay = prefs.defaultWakeFreeDay || '10:00';
@@ -179,15 +183,17 @@ export function buildPlanningContext(weekOffset = 0) {
     },
     ankiStatus: {
       quelle: anki.source,
+      letzterSyncHeute: ankiSyncedToday,
+      heuteBereitsGeloeggtMin: todayBreak.a,
       neueKartenBlau: anki.totalNew,
       lernKartenRot: anki.totalLearn,
       faelligeKartenGruen: anki.totalReview,
       faelligeKartenGesamt: anki.totalDue,
       gewichteSekunden: anki.weights,
-      geschaetzteMinutenHeute: anki.estMinutes,
-      mindestAnkiProTagMin: minDailyAnki,
-      empfohleneAnkiDauerMin: effectiveAnkiMin,
-      decks: anki.decks
+      heuteNochOffenBerechnetMin: todayAnkiRemainingMin,
+      taeglicherZeitpufferFolgetageMin: minDailyAnki,
+      aktiveDecks: (anki.decks || []).filter((d) => (d.due || 0) > 0),
+      planungsRegel: 'Tägliche Anki-Reviews werden NICHT als normale Todo-Punkte in items geplant, da die App sie jeden Tag automatisch aus dem neuen Anki-Sync berechnet! Reserviere die Anki-Zeit aber ZWINGEND im Tagesbudget (heute: heuteNochOffenBerechnetMin; Folgetage: taeglicherZeitpufferFolgetageMin).'
     },
     modulRegeln: moduleRules,
     uniTermineDieseWoche: weekUni,
@@ -218,10 +224,13 @@ Halte dich strikt an diese 6 Regeln und nutze jedes Feld aus dem JSON-Kontext ge
      * "normal": stabiler KIT-Rhythmus (~2,5–4,5 h an freien Tagen, ~1–2,5 h an vollen Uni-Tagen).
      * "fokus": hohes Pensum (~4–6 h an freien Tagen, ~2–3,5 h an Uni-Tagen).
 
-3. ANKI-SCHÄTZUNG NACH KARTENTYP (ankiStatus):
-   - Plane an JEDEM Tag einen eigenen Checklisten-Punkt für Anki-Reviews ("kind": "a").
-   - Nutze "ankiStatus.empfohleneAnkiDauerMin" (berechnet aus Blau=Neu, Rot=Lernen, Grün=Fällig; falls 0, greift "mindestAnkiProTagMin").
-   - Achte auf die Kartentypen: Viele neue (blaue) oder rote Karten sind kognitiv anstrengender als reine grüne Reviews – lege sie eher in frische Phasen (oder splitte sie bei > 45 Min.) statt müde spät abends.
+3. ANKI-ZEITBUDGET (DYNAMISCH ÜBER TÄGLICHEN ANKI-SYNC – SEHR WICHTIG!):
+   - Plane KEINE eigenen „Anki-Reviews“-Checklisten-Punkte ("kind": "a") in "items"! Die App berechnet jeden Tag automatisch nach dem neuen Anki-Sync die echte fällige Anki-Zeit aus Blau (Neu), Rot (Lernen) und Grün (Fällig) und zeigt sie dynamisch oben auf „Heute“ an.
+   - ABER reserviere die Anki-Zeit ZWINGEND im täglichen Zeitbudget, damit kein Tag überplant wird:
+     * HEUTE: Ziehe exakt "ankiStatus.heuteNochOffenBerechnetMin" vom verfügbaren Zeitbudget ab (bei vielen blauen/roten Karten heute entsprechend weniger andere schwere Blöcke einplanen!).
+     * FOLGETAGE (Di–So): Ziehe pauschal "ankiStatus.taeglicherZeitpufferFolgetageMin" (z. B. 30 Min.) pro Tag als Zeitpuffer vom Tagesbudget ab.
+     * Nenne in deiner kurzen Erklärung vor dem JSON explizit, wie viel Anki-Zeit du heute und an den Folgetagen im Budget reserviert hast!
+   - Hinweis: Das *Erstellen* neuer Anki-Karten nach einer Vorlesung (z. B. „WK: VL nacharbeiten + Ankis erstellen“) bleibt ein normaler Lern-Punkt ("kind": "l") – nur das tägliche *Durchgehen* der fälligen Reviews läuft dynamisch über den Anki-Sync.
    - Falls "weicheRhythmusOrientierung" gefüllt ist, nutze sie als lockere, flexible Leitlinie (niemals starr, wenn aktuelle Termine oder Energie dagegen sprechen).
 
 4. VORLESUNGEN, ÜBUNGEN, VIDEOS & HAUSAUFGABEN (uniTermineDieseWoche & modulRegeln):
@@ -251,9 +260,9 @@ Halte dich strikt an diese 6 Regeln und nutze jedes Feld aus dem JSON-Kontext ge
     {
       "d": "YYYY-MM-DD",
       "timeLabel": "",
-      "title": "Anki-Reviews (30 Min.)",
-      "kind": "a",
-      "estMin": 30,
+      "title": "WK: VL nacharbeiten & Ankis erstellen",
+      "kind": "l",
+      "estMin": 75,
       "backlogId": ""
     }
   ],
@@ -339,8 +348,8 @@ export function buildAuditInstruction() {
 ---
 SPEZIAL-MODUS: STRENGER KONTROLLEUR (PLAN-AUDIT)
 Prüfe "aktuelleCheckliste" zusammen mit "uniTermineDieseWoche", "offenerRueckstand", "tagesRhythmus", "ankiStatus" und "lernHistorieFuerKI" mit kritischem Blick:
-1. Harte Fehler: Überschneidungen mit Live-Uni-Terminen, Zeitfenster auf "heute" vor "aktuelleUhrzeit", Start vor "fruehesterLernstartFreieTage", fehlende Anki-Reviews, oder vergessene offene/überfällige Rückstände.
-2. Überlastungs-Fallen: Tage mit zu vielen schweren Nacharbeiten auf einmal, fehlende Pausen bei langen Uni-Tagen, verplanter Sonntag (falls "sonntagFreiAusserAnki" true), oder unrealistische Zeiten im Vergleich zu "echteDurchschnittszeitenProFach".
+1. Harte Fehler: Überschneidungen mit Live-Uni-Terminen, Zeitfenster auf "heute" vor "aktuelleUhrzeit", Start vor "fruehesterLernstartFreieTage", oder vergessene offene/überfällige Rückstände.
+2. Überlastungs-Fallen: Wurde das tägliche Anki-Zeitbudget (heute: "heuteNochOffenBerechnetMin", Folgetage: "taeglicherZeitpufferFolgetageMin") im Tagesbudget mitgedacht (ohne eigene Anki-Review-Todos in "items" zu erzeugen)? Tage mit zu vielen schweren Nacharbeiten auf einmal, fehlende Pausen bei langen Uni-Tagen, verplanter Sonntag (falls "sonntagFreiAusserAnki" true), oder unrealistische Zeiten im Vergleich zu "echteDurchschnittszeitenProFach".
 3. Formuliere zuerst maximal 5 knappe, direkte Kritikpunkte (ohne Emojis, klar nummeriert).
 4. Hänge danach DIREKT den korrigierten JSON-Planblock im exakt vorgegebenen Format an (mit "summary": "Korrigierter Plan nach Audit" und passenden "replaceDates"), damit der Student alle Schwachstellen mit 1 Klick fixen kann.`;
 }
@@ -355,11 +364,11 @@ ${JSON.stringify(ctx, null, 2)}
 
 ---
 AUFTRAG:
-Prüfe meinen aktuellen Wochenplan streng auf Fehler, Lücken und Überlastungs-Fallen und gib mir direkt die korrigierte Version.`;
+Prüfe meinen aktuellen Wochenplan streng auf Fehler, Lücken und Überlastungs-Fallen (inkl. Anki-Zeitbudget) und gib mir direkt die korrigierte Version.`;
 }
 
 export async function runPlanAudit(weekOffset = 0) {
-  const apiKey = (store.state.ai.apiKey || '').trim();
+  const apiKey = (store.state.ai.apiKey || '').replace(/\s+/g, '');
   if (!apiKey) {
     throw new Error('Kein Gemini API-Key hinterlegt. Trage ihn unter Einstellungen ein oder nutze „Audit-Prompt kopieren“.');
   }
@@ -374,26 +383,15 @@ export async function runPlanAudit(weekOffset = 0) {
   }];
 
   const preferred = store.state.ai.model || 'gemini-3.8-flash';
-  const tryModels = [preferred, ...FALLBACK_CHAIN.filter((m) => m !== preferred)];
-
-  let lastErr = null;
-  for (const model of tryModels) {
-    try {
-      const result = await callGeminiModel({ apiKey, model, contents, systemInstruction: sys });
-      const proposal = extractProposalFromReply(result.text);
-      return {
-        rawText: result.text,
-        displayText: stripJsonBlock(result.text) || (proposal ? proposal.summary : result.text),
-        proposal,
-        modelUsed: result.modelUsed,
-        usedFallback: result.modelUsed !== preferred
-      };
-    } catch (err) {
-      lastErr = err;
-      if (![404, 429, 500, 503].includes(err.status)) throw err;
-    }
-  }
-  throw lastErr || new Error('Gemini konnte nicht erreicht werden.');
+  const result = await callGeminiWithFallback({ apiKey, preferred, contents, systemInstruction: sys });
+  const proposal = extractProposalFromReply(result.text);
+  return {
+    rawText: result.text,
+    displayText: stripJsonBlock(result.text) || (proposal ? proposal.summary : result.text),
+    proposal,
+    modelUsed: result.modelUsed,
+    usedFallback: result.modelUsed !== preferred
+  };
 }
 
 export function buildWeeklyReviewContext(weekOffset = 0) {
@@ -463,7 +461,7 @@ export function extractRhythmSuggestion(text) {
 }
 
 export async function runWeeklyReview(weekOffset = 0) {
-  const apiKey = (store.state.ai.apiKey || '').trim();
+  const apiKey = (store.state.ai.apiKey || '').replace(/\s+/g, '');
   if (!apiKey) {
     throw new Error('Kein Gemini API-Key hinterlegt. Nutze unten „Rückblick-Prompt“ in der Gemini-Pro-Bridge.');
   }
@@ -475,25 +473,15 @@ export async function runWeeklyReview(weekOffset = 0) {
   }];
 
   const preferred = store.state.ai.model || 'gemini-3.8-flash';
-  const tryModels = [preferred, ...FALLBACK_CHAIN.filter((m) => m !== preferred)];
-  let lastErr = null;
-  for (const model of tryModels) {
-    try {
-      const result = await callGeminiModel({ apiKey, model, contents, systemInstruction: sys });
-      const suggestedRhythm = extractRhythmSuggestion(result.text);
-      return {
-        rawText: result.text,
-        displayText: stripJsonBlock(result.text) || result.text,
-        suggestedRhythm,
-        modelUsed: result.modelUsed,
-        usedFallback: result.modelUsed !== preferred
-      };
-    } catch (err) {
-      lastErr = err;
-      if (![404, 429, 500, 503].includes(err.status)) throw err;
-    }
-  }
-  throw lastErr || new Error('Gemini konnte nicht erreicht werden.');
+  const result = await callGeminiWithFallback({ apiKey, preferred, contents, systemInstruction: sys });
+  const suggestedRhythm = extractRhythmSuggestion(result.text);
+  return {
+    rawText: result.text,
+    displayText: stripJsonBlock(result.text) || result.text,
+    suggestedRhythm,
+    modelUsed: result.modelUsed,
+    usedFallback: result.modelUsed !== preferred
+  };
 }
 
 // ---------- Multimodal Semesterplan Image Scanner (#2) ----------
@@ -552,27 +540,17 @@ Bitte lies alle erkennbaren Termine (Vorlesung vs. Übung vs. Ausfall sowie Work
   }];
 
   const preferred = store.state.ai.model || 'gemini-3.8-flash';
-  const tryModels = [preferred, ...FALLBACK_CHAIN.filter((m) => m !== preferred)];
-  let lastErr = null;
-  for (const model of tryModels) {
-    try {
-      const result = await callGeminiModel({ apiKey, model, contents, systemInstruction: sys });
-      const match = /```json\s*([\s\S]*?)```/i.exec(result.text);
-      const jsonStr = match ? match[1] : result.text.trim();
-      const parsed = JSON.parse(jsonStr);
-      return {
-        summary: parsed.summary || 'Semesterplan erkannt',
-        overrides: Array.isArray(parsed.overrides) ? parsed.overrides : [],
-        customEvents: Array.isArray(parsed.customEvents) ? parsed.customEvents : [],
-        reminders: Array.isArray(parsed.reminders) ? parsed.reminders : [],
-        modelUsed: result.modelUsed
-      };
-    } catch (err) {
-      lastErr = err;
-      if (![404, 429, 500, 503].includes(err.status)) throw err;
-    }
-  }
-  throw lastErr || new Error('Bild-Analyse fehlgeschlagen.');
+  const result = await callGeminiWithFallback({ apiKey: apiKey.replace(/\s+/g, ''), preferred, contents, systemInstruction: sys });
+  const match = /```json\s*([\s\S]*?)```/i.exec(result.text);
+  const jsonStr = match ? match[1] : result.text.trim();
+  const parsed = JSON.parse(jsonStr);
+  return {
+    summary: parsed.summary || 'Semesterplan erkannt',
+    overrides: Array.isArray(parsed.overrides) ? parsed.overrides : [],
+    customEvents: Array.isArray(parsed.customEvents) ? parsed.customEvents : [],
+    reminders: Array.isArray(parsed.reminders) ? parsed.reminders : [],
+    modelUsed: result.modelUsed
+  };
 }
 
 export function buildGeminiProBridgePrompt(userRequest, weekOffset = 0) {
@@ -585,20 +563,40 @@ ${JSON.stringify(ctx, null, 2)}
 
 ---
 MEIN WUNSCH:
-${userRequest || 'Erstelle mir bitte meine Uni-Plan Checkliste für diese Woche mit Anki-Reviews, offenen Rückständen, Vorlesungs-Nacharbeit, Videos und HAs.'}`;
+${userRequest || 'Erstelle mir bitte meine Uni-Plan Checkliste für diese Woche (offene Rückstände, Vorlesungs-Nacharbeit, Videos und HAs). Plane KEINE eigenen Anki-Review-Punkte ein, aber reserviere die berechnete Anki-Zeit aus ankiStatus (heute + täglicher Puffer für Folgetage) sauber im Tagesbudget und nenne sie kurz in deiner Erklärung.'}`;
 }
 
 async function callGeminiModel({ apiKey, model, contents, systemInstruction }) {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey.trim())}`;
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      system_instruction: { parts: [{ text: systemInstruction }] },
-      contents,
-      generationConfig: { temperature: 0.45 }
-    })
-  });
+  const cleanKey = (apiKey || '').replace(/\s+/g, '');
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(cleanKey)}`;
+  const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timer = ctrl ? setTimeout(() => ctrl.abort(), 45000) : null;
+
+  let res;
+  try {
+    res = await fetch(url, {
+      method: 'POST',
+      mode: 'cors',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      signal: ctrl?.signal,
+      body: JSON.stringify({
+        system_instruction: { parts: [{ text: systemInstruction }] },
+        contents,
+        generationConfig: { temperature: 0.45 }
+      })
+    });
+  } catch (err) {
+    const netErr = new Error(
+      err?.name === 'AbortError'
+        ? 'Zeitüberschreitung (45 s) bei Gemini.'
+        : 'Netzwerkfehler beim Verbinden mit Gemini.'
+    );
+    netErr.isNetworkError = true;
+    throw netErr;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 
   if (!res.ok) {
     let detail = `HTTP ${res.status}`;
@@ -617,15 +615,42 @@ async function callGeminiModel({ apiKey, model, contents, systemInstruction }) {
   return { text, modelUsed: model };
 }
 
+async function callGeminiWithFallback({ apiKey, preferred, contents, systemInstruction }) {
+  const tryModels = [preferred, ...FALLBACK_CHAIN.filter((m) => m !== preferred)];
+  let lastErr = null;
+  let allNetworkErrors = true;
+
+  for (let i = 0; i < tryModels.length; i++) {
+    const model = tryModels[i];
+    try {
+      return await callGeminiModel({ apiKey, model, contents, systemInstruction });
+    } catch (err) {
+      lastErr = err;
+      if (!err.isNetworkError) allNetworkErrors = false;
+      const retryable = err.isNetworkError || [404, 429, 500, 503].includes(err.status);
+      if (!retryable) throw err;
+      // Short pause before next fallback attempt
+      if (i < tryModels.length - 1) {
+        await new Promise((r) => setTimeout(r, err.isNetworkError ? 450 : 250));
+      }
+    }
+  }
+
+  if (allNetworkErrors) {
+    throw new Error('Verbindung zu Gemini im Browser blockiert oder unterbrochen (Netzwerkfehler). Tipp: In Firefox den Schutz vor Aktivitätenverfolgung / Adblocker für diese Seite kurz deaktivieren — oder unten die Gemini-Pro-Bridge nutzen.');
+  }
+  throw lastErr || new Error('Gemini konnte nicht erreicht werden.');
+}
+
 export async function sendPlannerMessage(userText, weekOffset = 0) {
-  const apiKey = (store.state.ai.apiKey || '').trim();
+  const apiKey = (store.state.ai.apiKey || '').replace(/\s+/g, '');
   if (!apiKey) {
     throw new Error('Kein Gemini API-Key hinterlegt. Trage ihn unter Einstellungen ein oder nutze die Gemini-Pro-Bridge.');
   }
 
   const ctx = buildPlanningContext(weekOffset);
   const sys = buildSystemInstruction();
-  const recentHistory = (store.state.ai.chat || []).slice(-8).map((m) => ({
+  const recentHistory = (store.state.ai.chat || []).slice(-6).map((m) => ({
     role: m.role === 'user' ? 'user' : 'model',
     parts: [{ text: m.text }]
   }));
@@ -634,46 +659,25 @@ export async function sendPlannerMessage(userText, weekOffset = 0) {
   const contents = [...recentHistory, { role: 'user', parts: [{ text: currentUserPayload }] }];
 
   const preferred = store.state.ai.model || 'gemini-3.8-flash';
-  const tryModels = [preferred, ...FALLBACK_CHAIN.filter((m) => m !== preferred)];
-
-  let lastErr = null;
-  for (const model of tryModels) {
-    try {
-      const result = await callGeminiModel({ apiKey, model, contents, systemInstruction: sys });
-      const proposal = extractProposalFromReply(result.text);
-      return {
-        rawText: result.text,
-        displayText: stripJsonBlock(result.text) || (proposal ? proposal.summary : result.text),
-        proposal,
-        modelUsed: result.modelUsed,
-        usedFallback: result.modelUsed !== preferred
-      };
-    } catch (err) {
-      lastErr = err;
-      if (![404, 429, 500, 503].includes(err.status)) throw err;
-    }
-  }
-  throw lastErr || new Error('Gemini konnte nicht erreicht werden.');
+  const result = await callGeminiWithFallback({ apiKey, preferred, contents, systemInstruction: sys });
+  const proposal = extractProposalFromReply(result.text);
+  return {
+    rawText: result.text,
+    displayText: stripJsonBlock(result.text) || (proposal ? proposal.summary : result.text),
+    proposal,
+    modelUsed: result.modelUsed,
+    usedFallback: result.modelUsed !== preferred
+  };
 }
 
 export async function testGeminiConnection(apiKey, model = 'gemini-3.8-flash') {
-  const tryModels = [model, ...FALLBACK_CHAIN.filter((m) => m !== model)];
-  let lastErr = null;
-  for (const m of tryModels) {
-    try {
-      const res = await callGeminiModel({
-        apiKey,
-        model: m,
-        systemInstruction: 'Antworte kurz auf Deutsch.',
-        contents: [{ role: 'user', parts: [{ text: 'Sag nur OK' }] }]
-      });
-      return { ok: true, modelUsed: res.modelUsed, reply: res.text.trim() };
-    } catch (err) {
-      lastErr = err;
-      if (![404, 429, 500, 503].includes(err.status)) throw err;
-    }
-  }
-  throw lastErr;
+  const res = await callGeminiWithFallback({
+    apiKey: (apiKey || '').replace(/\s+/g, ''),
+    preferred: model,
+    systemInstruction: 'Antworte kurz auf Deutsch.',
+    contents: [{ role: 'user', parts: [{ text: 'Sag nur OK' }] }]
+  });
+  return { ok: true, modelUsed: res.modelUsed, reply: res.text.trim() };
 }
 
 export function applyProposalToWeek(proposal) {

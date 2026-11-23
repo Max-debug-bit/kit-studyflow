@@ -61,6 +61,7 @@ export async function syncAnkiConnect({ alsoLogStudyTime = false } = {}) {
   store.state.anki.decks = decks;
   store.state.anki.todayMinutes = todayMinutes;
   store.state.anki.lastSyncAt = Date.now();
+  store.state.anki.updatedAt = Date.now();
   store.state.anki.mode = 'auto';
   store.save();
 
@@ -147,5 +148,6 @@ export function setManualAnki({ newCards, learnCards, reviewCards, secNew, secLe
   if (secNew !== undefined) store.state.anki.secNew = Math.max(5, Math.round(Number(secNew) || 45));
   if (secLearn !== undefined) store.state.anki.secLearn = Math.max(5, Math.round(Number(secLearn) || 30));
   if (secReview !== undefined) store.state.anki.secReview = Math.max(5, Math.round(Number(secReview) || 15));
+  store.state.anki.updatedAt = Date.now();
   store.save();
 }

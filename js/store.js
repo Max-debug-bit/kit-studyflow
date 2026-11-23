@@ -125,6 +125,7 @@ export function createDefaultState() {
     eventOverrides: {},    // { [uid]: 'lecture' | 'exercise' | 'cancelled' }
     restDays: {},          // { 'YYYY-MM-DD': true } manual rest days protecting streak (#1)
     autopilotHandled: {},  // { [uid]: timestamp } already accepted or dismissed autopilot suggestions
+    mapMeta: {},           // { [mapName]: { [key]: timestamp } } per-key conflict resolution for Gist sync
     deletedIds: {},        // { [id]: timestamp } tombstones for conflict-safe 2-way Gist merge
     customEvents: [],      // { id, title, shortName, recurrence, weekday, date, start, end, eventType, liveReviewMinutes, location, updatedAt }
     modules: {},           // { [moduleKey]: ModuleRule }
@@ -145,6 +146,7 @@ export function createDefaultState() {
       secReview: 15,        // Grün (Fällige Reviews)
       minDailyAnkiMin: 30,
       lastSyncAt: 0,
+      updatedAt: 0,
       manualNew: 0,         // Blau
       manualLearn: 0,       // Rot
       manualReview: 0,      // Grün
@@ -255,6 +257,7 @@ class Store {
       eventOverrides: { ...(data.eventOverrides || {}) },
       restDays: { ...(data.restDays || {}) },
       autopilotHandled: { ...(data.autopilotHandled || {}) },
+      mapMeta: JSON.parse(JSON.stringify(data.mapMeta || {})),
       deletedIds: { ...(data.deletedIds || {}) },
       dayNotes: { ...(data.dayNotes || {}) },
       e: Array.isArray(data.e) ? data.e : [],
@@ -335,8 +338,8 @@ class Store {
     return state;
   }
 
-  save({ skipSync = false, silent = false } = {}) {
-    this.state.updatedAt = Date.now();
+  save({ skipSync = false, silent = false, preserveTimestamp = false } = {}) {
+    if (!preserveTimestamp) this.state.updatedAt = Date.now();
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(this.state));
     } catch (err) {
@@ -346,6 +349,12 @@ class Store {
     if (!skipSync) {
       this._syncHooks.forEach((fn) => fn());
     }
+  }
+
+  touchMapKey(mapName, key) {
+    if (!this.state.mapMeta) this.state.mapMeta = {};
+    if (!this.state.mapMeta[mapName]) this.state.mapMeta[mapName] = {};
+    this.state.mapMeta[mapName][String(key)] = Date.now();
   }
 
   saveSecrets({ silent = false } = {}) {
@@ -450,7 +459,8 @@ class Store {
       d: dateStr,
       t: timeStr,
       m: minutes,
-      k: k || 'l'
+      k: k || 'l',
+      updatedAt: Date.now()
     };
     if (mod) entry.mod = mod;
     if (act) entry.act = act; // 'video' | 'review' | 'homework' | 'anki' | 'exam' | 'other'
@@ -550,6 +560,7 @@ class Store {
     if (dStr > toDateStr()) return false;
     if (!tStr) delete this.state.w[dStr];
     else this.state.w[dStr] = tStr;
+    this.touchMapKey('w', dStr);
     this.save();
     return true;
   }
@@ -558,6 +569,7 @@ class Store {
     if (dStr > toDateStr()) return false;
     if (!tStr) delete this.state.sx[dStr];
     else this.state.sx[dStr] = tStr;
+    this.touchMapKey('sx', dStr);
     this.save();
     return true;
   }
@@ -572,7 +584,8 @@ class Store {
       d: d || toDateStr(),
       t: t || toTimeStr(),
       mg: amount,
-      n: (n || 'Koffein').trim()
+      n: (n || 'Koffein').trim(),
+      updatedAt: Date.now()
     };
     this.state.cf.push(item);
     this.save();
@@ -758,6 +771,7 @@ class Store {
     if (!this.state.restDays) this.state.restDays = {};
     const next = !this.isRestDay(dStr);
     this.state.restDays[dStr] = next;
+    this.touchMapKey('restDays', dStr);
     this.save();
     return next;
   }

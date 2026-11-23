@@ -75,7 +75,7 @@ export function renderPlannerView(root, { toast, navigate }) {
         <div class="row" style="gap:7px;">
           <span class="pill ${store.state.icsRaw ? 'kit' : 'prod'}">${store.state.icsRaw ? 'KIT-Kalender aktiv' : 'Kein .ics geladen'}</span>
           <span class="pill purple">${videoMods} ${videoMods === 1 ? 'Video-Modul' : 'Video-Module'}</span>
-          <span class="pill anki">Anki: ${anki.totalNew}B · ${anki.totalLearn}R · ${anki.totalReview}G (~${effAnki}m)</span>
+          <span class="pill anki">Anki heute: ${anki.totalNew}B · ${anki.totalLearn}R · ${anki.totalReview}G (~${anki.estMinutes}m · Puffer ${minAnki}m/Tag)</span>
           <span class="pill ${openBacklog > 0 ? 'prod' : ''}">${openBacklog} im Rückstand</span>
           <span class="pill">Mindestziel ${fmtMin(store.state.goal)}</span>
           <span class="pill">Frei ab ~${store.state.planningPrefs?.defaultWakeFreeDay || '10:00'}</span>
@@ -107,56 +107,15 @@ export function renderPlannerView(root, { toast, navigate }) {
 
       <section class="card chat-shell">
         <div class="chip-row">
-          <button class="chip" data-quick="Erstelle mir eine realistische Uni-Plan Checkliste für diese Woche mit täglichen Anki-Reviews, offenen Vorlesungen/Videos, HAs und Vormerken.">Wochen-Checkliste erstellen</button>
+          <button class="chip" data-quick="Erstelle mir eine realistische Uni-Plan Checkliste für diese Woche (offene Vorlesungen/Videos, Nacharbeit, HAs, Rückstand) und reserviere das tägliche Anki-Zeitbudget im Hintergrund.">Wochen-Checkliste erstellen</button>
           <button class="chip" data-quick="Was fällt diese Woche für mein Maschinenbau-Studium alles an (offene Videos, Ankis erstellen, HAs)?">Was fällt diese Woche an?</button>
-          <button class="chip" data-quick="Plane mir den heutigen Tag realistisch um – ich will Anki und die wichtigsten Punkte sauber schaffen.">Heute umplanen</button>
+          <button class="chip" data-quick="Plane mir den heutigen Tag realistisch um – berücksichtige meine heutigen fälligen Ankis im Zeitbudget und die wichtigsten Punkte.">Heute umplanen</button>
           <button class="chip" data-quick="Ich habe noch Vorlesungs-Videos und Anki-Erstellung für MKL/WK/FT/TM offen. Verteil das sinnvoll auf die Woche.">Rückstand verteilen</button>
         </div>
 
         <div class="chat-messages" id="chat-messages">
-          ${chat.length === 0 ? `
-            <div class="msg assistant">Ich kenne deinen KIT-Stundenplan, deine Modul-Regeln (Live vs. Video), deine fälligen Ankis und deine echten Lernzeiten.
-
-Schreib einfach, was diese Woche ansteht, welche Vorlesungen noch offen sind oder wann du privat unterwegs bist – ich erstelle dir direkt eine abhakbare Uni-Checkliste.</div>
-          ` : chat.map((m, idx) => `
-            <div class="msg ${m.role === 'user' ? 'user' : 'assistant'}">
-              <div>${esc(m.text)}</div>
-              ${m.modelUsed ? `<div class="xs soft" style="margin-top:6px;">${esc(m.modelUsed)}${m.usedFallback ? ' (Auto-Fallback)' : ''}</div>` : ''}
-              ${m.suggestedRhythm ? `
-                <div class="proposal-card">
-                  <div class="row-between" style="margin-bottom:6px;">
-                    <strong class="xs mono">VORSCHLAG: RHYTHMUS-ORIENTIERUNG</strong>
-                    ${m.rhythmApplied ? '<span class="pill kit">Übernommen</span>' : `<button class="btn btn-xs btn-primary" data-apply-rhythm="${idx}">${icon('check', 12)} Übernehmen</button>`}
-                  </div>
-                  <div class="small muted">${esc(m.suggestedRhythm)}</div>
-                </div>
-              ` : ''}
-              ${m.proposal ? `
-                <div class="proposal-card">
-                  <div class="row-between" style="margin-bottom:8px;">
-                    <strong class="small">${esc(m.proposal.summary)}</strong>
-                    ${m.applied ? '<span class="pill kit">Übernommen</span>' : `<button class="btn btn-xs btn-primary" data-apply-prop="${idx}">${icon('check', 12)} In Checkliste übernehmen</button>`}
-                  </div>
-                  ${m.proposal.replaceDates?.length ? `<div class="xs muted" style="margin-bottom:6px;">Ersetzt offene Punkte an: ${m.proposal.replaceDates.map(fmtDateShort).join(', ')}</div>` : ''}
-                  <div class="entry-list">
-                    ${(m.proposal.items || []).map((it) => `
-                      <div class="entry-row" style="padding:6px 9px;">
-                        <span class="small"><strong class="mono">${fmtDateShort(it.d)}${it.timeLabel ? ` · ${esc(it.timeLabel)}` : ''}</strong> — ${esc(it.title)}</span>
-                        <div class="row" style="gap:4px;">
-                          ${it.backlogId ? '<span class="pill">Rückstand</span>' : ''}
-                          <span class="pill ${it.kind === 'a' ? 'anki' : it.kind === 'p' ? 'prod' : 'learn'}">${it.kind === 'a' ? 'Anki' : it.kind === 'p' ? 'Orga' : 'Lernen'}</span>
-                        </div>
-                      </div>
-                    `).join('')}
-                  </div>
-                  ${(m.proposal.reminders || []).length ? `
-                    <div class="xs muted" style="margin-top:8px;">Vormerken: ${m.proposal.reminders.map(esc).join(' · ')}</div>
-                  ` : ''}
-                </div>
-              ` : ''}
-            </div>
-          `).join('')}
-          ${isSending ? '<div class="msg assistant muted">Gemini erstellt deinen Plan...</div>' : ''}
+          ${chat.length === 0 ? `<div class="msg assistant"><div class="msg-text">Ich kenne deinen KIT-Stundenplan, deine Modul-Regeln (Live vs. Video), deinen aktuellen Anki-Stand und deine echten Lernzeiten.\n\nSchreib einfach, was diese Woche ansteht oder wann du privat unterwegs bist – ich erstelle dir direkt eine abhakbare Uni-Checkliste (tägliche Anki-Reviews werden automatisch über deinen Anki-Sync berechnet und im Tagesbudget reserviert).</div></div>` : chat.map((m, idx) => `<div class="msg ${m.role === 'user' ? 'user' : 'assistant'}"><div class="msg-text">${esc(m.text)}</div>${m.modelUsed ? `<div class="xs soft" style="margin-top:6px;">${esc(m.modelUsed)}${m.usedFallback ? ' (Auto-Fallback)' : ''}</div>` : ''}${m.suggestedRhythm ? `<div class="proposal-card"><div class="row-between" style="margin-bottom:6px;"><strong class="xs mono">VORSCHLAG: RHYTHMUS-ORIENTIERUNG</strong>${m.rhythmApplied ? '<span class="pill kit">Übernommen</span>' : `<button class="btn btn-xs btn-primary" data-apply-rhythm="${idx}">${icon('check', 12)} Übernehmen</button>`}</div><div class="small muted">${esc(m.suggestedRhythm)}</div></div>` : ''}${m.proposal ? `<div class="proposal-card"><div class="row-between" style="margin-bottom:8px;"><strong class="small">${esc(m.proposal.summary)}</strong>${m.applied ? '<span class="pill kit">Übernommen</span>' : `<button class="btn btn-xs btn-primary" data-apply-prop="${idx}">${icon('check', 12)} In Checkliste übernehmen</button>`}</div>${m.proposal.replaceDates?.length ? `<div class="xs muted" style="margin-bottom:6px;">Ersetzt offene Punkte an: ${m.proposal.replaceDates.map(fmtDateShort).join(', ')}</div>` : ''}<div class="entry-list">${(m.proposal.items || []).map((it) => `<div class="entry-row" style="padding:6px 9px;"><span class="small"><strong class="mono">${fmtDateShort(it.d)}${it.timeLabel ? ` · ${esc(it.timeLabel)}` : ''}</strong> — ${esc(it.title)}</span><div class="row" style="gap:4px;">${it.backlogId ? '<span class="pill">Rückstand</span>' : ''}<span class="pill ${it.kind === 'a' ? 'anki' : it.kind === 'p' ? 'prod' : 'learn'}">${it.kind === 'a' ? 'Anki' : it.kind === 'p' ? 'Orga' : 'Lernen'}</span></div></div>`).join('')}</div>${(m.proposal.reminders || []).length ? `<div class="xs muted" style="margin-top:8px;">Vormerken: ${m.proposal.reminders.map(esc).join(' · ')}</div>` : ''}</div>` : ''}</div>`).join('')}
+          ${isSending ? '<div class="msg assistant muted"><div class="msg-text">Gemini erstellt deinen Plan...</div></div>' : ''}
         </div>
 
         <form id="chat-form" class="row" style="align-items:flex-end;">
@@ -263,7 +222,11 @@ Schreib einfach, was diese Woche ansteht, welche Vorlesungen noch offen sind ode
     });
   });
 
-  root.querySelector('#btn-clear-chat')?.addEventListener('click', () => { store.state.ai.chat = []; store.save(); });
+  root.querySelector('#btn-clear-chat')?.addEventListener('click', () => {
+    store.state.ai.chat = [];
+    store.state.ai.chatClearedAt = Date.now();
+    store.save();
+  });
   root.querySelector('#btn-open-ai-settings')?.addEventListener('click', () => navigate('more', { subtab: 'settings' }));
   root.querySelector('#btn-goto-key')?.addEventListener('click', () => navigate('more', { subtab: 'settings' }));
 

@@ -124,7 +124,10 @@ export function deleteBacklogItem(id) {
 export function scheduleBacklogToDay(backlogId, dStr = toDateStr(), timeLabel = '') {
   const b = store.state.backlog.find((x) => x.id === backlogId);
   if (!b) return null;
-  // Remove any stale uncompleted checklist item for this backlogId (e.g. overdue from yesterday)
+  // Remove any stale uncompleted checklist item for this backlogId (e.g. overdue from yesterday) and tombstone it
+  for (const c of store.state.checklist) {
+    if (c.backlogId === backlogId && !c.done) store.markDeleted(c.id);
+  }
   store.state.checklist = store.state.checklist.filter((c) => !(c.backlogId === backlogId && !c.done));
   const chk = addChecklistItem({
     d: dStr,
@@ -203,8 +206,10 @@ export function getUnfinishedFromYesterday(todayStr = toDateStr()) {
 
 export function rolloverYesterdayToToday(todayStr = toDateStr()) {
   const items = getUnfinishedFromYesterday(todayStr);
+  const nowTs = Date.now();
   for (const it of items) {
     it.d = todayStr; // backlogId moves right along with it!
+    it.updatedAt = nowTs;
   }
   if (items.length) {
     reconcileBacklogStatus({ todayStr });
@@ -381,10 +386,13 @@ export function setEventOverride(uid, dStr, overrideType) {
   if (!store.state.eventOverrides) store.state.eventOverrides = {};
   if (!overrideType || overrideType === 'default') delete store.state.eventOverrides[uid];
   else store.state.eventOverrides[uid] = overrideType;
+  store.touchMapKey('eventOverrides', uid);
 
   // If marked cancelled, also clear forced attendance so it doesn't book minutes
-  if (overrideType === 'cancelled' && store.state.lectureAttendance) {
+  if (overrideType === 'cancelled') {
+    if (!store.state.lectureAttendance) store.state.lectureAttendance = {};
     store.state.lectureAttendance[uid] = 'skipped';
+    store.touchMapKey('lectureAttendance', uid);
   }
   syncDayLecturesToProductive(dStr, { save: false });
   store.save();
@@ -495,6 +503,7 @@ export function syncDayLecturesToProductive(dStr = toDateStr(), { save = true } 
         store.state.e[existingIdx].m = totalMin;
         store.state.e[existingIdx].t = lastEnd;
         store.state.e[existingIdx].lectureCount = attended.length;
+        store.state.e[existingIdx].updatedAt = Date.now();
         changed = true;
       }
     } else {
@@ -505,12 +514,17 @@ export function syncDayLecturesToProductive(dStr = toDateStr(), { save = true } 
         m: totalMin,
         k: 'p',
         autoLecture: true,
-        lectureCount: attended.length
+        lectureCount: attended.length,
+        updatedAt: Date.now()
       });
       changed = true;
     }
   } else if (existingIdx >= 0) {
-    store.state.e.splice(existingIdx, 1);
+    const [removed] = store.state.e.splice(existingIdx, 1);
+    if (removed && removed.id !== undefined) {
+      if (!store.state.deletedIds) store.state.deletedIds = {};
+      store.state.deletedIds[String(removed.id)] = Date.now();
+    }
     changed = true;
   }
 
@@ -522,6 +536,7 @@ export function setLectureAttendance(uid, dStr, status) {
   if (!store.state.lectureAttendance) store.state.lectureAttendance = {};
   if (status === 'auto') delete store.state.lectureAttendance[uid];
   else store.state.lectureAttendance[uid] = status;
+  store.touchMapKey('lectureAttendance', uid);
   syncDayLecturesToProductive(dStr, { save: false });
   store.save();
 }
@@ -596,8 +611,11 @@ export function applyParsedChecklist({ items, dayNotes, reminders, replaceDates 
   const todayStr = toDateStr();
   const replaceSet = new Set(replaceDates);
 
-  // 1. Replace uncompleted checklist items on replaceDates
+  // 1. Replace uncompleted checklist items on replaceDates (record tombstones so Gist merge never resurrects them!)
   if (replaceSet.size) {
+    for (const c of store.state.checklist) {
+      if (replaceSet.has(c.d) && !c.done) store.markDeleted(c.id);
+    }
     store.state.checklist = store.state.checklist.filter((c) => !(replaceSet.has(c.d) && !c.done));
   }
 
@@ -606,6 +624,7 @@ export function applyParsedChecklist({ items, dayNotes, reminders, replaceDates 
 
   // 2. Validate backlogIds against real store.state.backlog (anti-hallucination guard!)
   const validBacklogIds = new Set((store.state.backlog || []).map((b) => b.id));
+  const nowTs = Date.now();
 
   let addedItems = 0;
   for (const it of (items || [])) {
@@ -613,7 +632,10 @@ export function applyParsedChecklist({ items, dayNotes, reminders, replaceDates 
     const backlogId = rawBacklogId && validBacklogIds.has(rawBacklogId) ? rawBacklogId : '';
 
     if (backlogId) {
-      // Edge case: If this backlogId has a stale uncompleted entry in the past (d < today), remove the stale past entry!
+      // Edge case: If this backlogId has a stale uncompleted entry in the past (d < today), remove & tombstone it!
+      for (const c of store.state.checklist) {
+        if (c.backlogId === backlogId && !c.done && c.d < todayStr) store.markDeleted(c.id);
+      }
       store.state.checklist = store.state.checklist.filter(
         (c) => !(c.backlogId === backlogId && !c.done && c.d < todayStr)
       );
@@ -626,7 +648,7 @@ export function applyParsedChecklist({ items, dayNotes, reminders, replaceDates 
     }
 
     store.state.checklist.push({
-      id: `chk_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      id: `chk_${nowTs}_${addedItems}_${Math.random().toString(36).slice(2, 6)}`,
       d: it.d,
       timeLabel: it.timeLabel || '',
       title: it.title,
@@ -635,13 +657,15 @@ export function applyParsedChecklist({ items, dayNotes, reminders, replaceDates 
       moduleId: it.moduleId || '',
       backlogId,
       done: false,
-      source: 'ai'
+      source: 'ai',
+      updatedAt: nowTs
     });
     addedItems++;
   }
 
   if (dayNotes && typeof dayNotes === 'object') {
     store.state.dayNotes = { ...(store.state.dayNotes || {}), ...dayNotes };
+    for (const d of Object.keys(dayNotes)) store.touchMapKey('dayNotes', d);
   }
 
   let addedReminders = 0;
@@ -650,10 +674,11 @@ export function applyParsedChecklist({ items, dayNotes, reminders, replaceDates 
     const txt = typeof r === 'string' ? r : r.text;
     if (txt && !existingRem.has(txt.toLowerCase())) {
       store.state.reminders.push({
-        id: `rem_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
+        id: `rem_${nowTs}_${addedReminders}_${Math.random().toString(36).slice(2, 5)}`,
         text: txt.trim(),
         date: r.date || '',
-        done: false
+        done: false,
+        updatedAt: nowTs
       });
       addedReminders++;
     }
@@ -684,9 +709,11 @@ export function applySemesterScanResult(scan) {
     });
     for (const ev of matches) {
       store.state.eventOverrides[ev.uid] = ov.overrideType; // 'exercise' | 'lecture' | 'cancelled'
+      store.touchMapKey('eventOverrides', ev.uid);
       if (ov.overrideType === 'cancelled') {
         if (!store.state.lectureAttendance) store.state.lectureAttendance = {};
         store.state.lectureAttendance[ev.uid] = 'skipped';
+        store.touchMapKey('lectureAttendance', ev.uid);
       }
       appliedOverrides++;
     }

@@ -338,9 +338,10 @@ export function renderWeekView(root, { toast, navigate, openModal, closeModal, p
   `;
 
   // Navigation
-  root.querySelector('#wk-prev')?.addEventListener('click', () => { weekOffset--; renderWeekView(root, { toast, navigate, openModal, closeModal }); });
-  root.querySelector('#wk-now')?.addEventListener('click', () => { weekOffset = 0; renderWeekView(root, { toast, navigate, openModal, closeModal }); });
-  root.querySelector('#wk-next')?.addEventListener('click', () => { weekOffset++; renderWeekView(root, { toast, navigate, openModal, closeModal }); });
+  const viewCtx = { toast, navigate, openModal, closeModal, promptLogFromChecklist };
+  root.querySelector('#wk-prev')?.addEventListener('click', () => { weekOffset--; renderWeekView(root, viewCtx); });
+  root.querySelector('#wk-now')?.addEventListener('click', () => { weekOffset = 0; renderWeekView(root, viewCtx); });
+  root.querySelector('#wk-next')?.addEventListener('click', () => { weekOffset++; renderWeekView(root, viewCtx); });
   root.querySelector('#wk-ai-plan')?.addEventListener('click', () => navigate('planner'));
   root.querySelector('#wk-audit-plan')?.addEventListener('click', () => navigate('planner', { autoAudit: true }));
   root.querySelector('#wk-review-plan')?.addEventListener('click', () => navigate('planner', { autoReview: true }));
@@ -456,6 +457,7 @@ export function renderWeekView(root, { toast, navigate, openModal, closeModal, p
       if (!mod || !min) return;
       if (act === 'video') { mod.videoStudyMinutes = min; mod.studyMinutes = min; }
       else { mod.liveReviewMinutes = min; }
+      store.touchMapKey('modules', id);
       store.save();
       toast(`${mod.shortName} auf Ø ${min} min kalibriert.`, 'ok');
     });
@@ -752,6 +754,7 @@ export function renderWeekView(root, { toast, navigate, openModal, closeModal, p
           const val = modalEl.querySelector('#mn-txt').value.trim();
           if (!val) delete store.state.dayNotes[d];
           else store.state.dayNotes[d] = val;
+          store.touchMapKey('dayNotes', d);
           store.save();
           closeModal();
         });
@@ -823,7 +826,13 @@ export function renderWeekView(root, { toast, navigate, openModal, closeModal, p
       </form>
     `, (modalEl) => {
       modalEl.querySelector('#m-close')?.addEventListener('click', closeModal);
-      modalEl.querySelector('#mm-del')?.addEventListener('click', () => { delete store.state.modules[existing.id]; store.save(); closeModal(); });
+      modalEl.querySelector('#mm-del')?.addEventListener('click', () => {
+        store.markDeleted(`mod_${existing.id}`);
+        delete store.state.modules[existing.id];
+        store.touchMapKey('modules', existing.id);
+        store.save();
+        closeModal();
+      });
       modalEl.querySelector('#m-mod-form')?.addEventListener('submit', (e) => {
         e.preventDefault();
         const shortName = modalEl.querySelector('#mm-short').value.trim();
@@ -843,6 +852,7 @@ export function renderWeekView(root, { toast, navigate, openModal, closeModal, p
           ankiDeck: modalEl.querySelector('#mm-deck').value.trim(),
           notes: modalEl.querySelector('#mm-notes').value.trim()
         };
+        store.touchMapKey('modules', id);
         store.save();
         closeModal();
         toast(`Regel für ${shortName} gespeichert.`, 'ok');

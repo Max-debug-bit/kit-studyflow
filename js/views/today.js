@@ -60,7 +60,8 @@ function fmtHMS(totalSec) {
   return h > 0 ? `${pad2(h)}:${pad2(m)}:${pad2(sec)}` : `${pad2(m)}:${pad2(sec)}`;
 }
 
-export function renderTodayView(root, { toast, navigate, promptLogFromChecklist }) {
+export function renderTodayView(root, ctx) {
+  const { toast, navigate, promptLogFromChecklist } = ctx;
   if (activeTimerTick) {
     clearInterval(activeTimerTick);
     activeTimerTick = null;
@@ -85,6 +86,9 @@ export function renderTodayView(root, { toast, navigate, promptLogFromChecklist 
   const caf = store.getCaffeineTodaySummary(now);
   const todayEntries = store.state.e.filter((x) => x.d === today);
   const anki = getAnkiLoadSummary();
+  const minDailyAnki = Math.max(10, Number(store.state.anki.minDailyAnkiMin) || 30);
+  const ankiSyncedToday = Boolean(anki.lastSyncAt && toDateStr(new Date(anki.lastSyncAt)) === today);
+  const ankiDoneToday = anki.totalDue === 0 && day.a > 0;
   const timerStatus = store.getTimerStatus();
   const ui = store.state.ui;
   if (timerStatus) ui.tdt = true;
@@ -184,6 +188,31 @@ export function renderTodayView(root, { toast, navigate, promptLogFromChecklist 
             <button class="btn btn-xs btn-primary" id="btn-rollover">Auf heute schieben</button>
           </div>
         ` : ''}
+
+        <!-- Dynamic Daily Anki Row (auto-calculated from daily Anki sync, no static AI Anki todos needed) -->
+        <div class="entry-row" style="margin-bottom:8px;padding:8px 11px;border-color:${ankiDoneToday ? 'rgba(16,185,129,0.3)' : 'rgba(244,114,182,0.28)'};">
+          <div style="min-width:0;">
+            <div class="row" style="gap:6px;">
+              <span class="pill anki">Anki heute</span>
+              <span class="small" style="font-weight:600;">
+                ${anki.totalDue > 0
+                  ? `${anki.totalDue} fällige Karten → ~${anki.estMinutes} min`
+                  : ankiDoneToday
+                    ? `Erledigt (${fmtMin(day.a)} geloggt)`
+                    : (ankiSyncedToday ? '0 fällige Karten' : `Noch kein Sync heute (Puffer ~${minDailyAnki} min)`)}
+              </span>
+            </div>
+            <div class="xs muted mono" style="margin-top:3px;">
+              <span class="anki-dot blue"></span>${anki.totalNew} · <span class="anki-dot red"></span>${anki.totalLearn} · <span class="anki-dot green"></span>${anki.totalReview}
+              ${day.a > 0 ? ` · heute geloggt: ${fmtMin(day.a)}` : ''}
+              ${anki.lastSyncAt ? ` · Sync ${toTimeStr(new Date(anki.lastSyncAt))}` : ''}
+            </div>
+          </div>
+          <div class="row" style="gap:5px;flex-wrap:nowrap;">
+            <button class="btn btn-xs" id="btn-anki-row-sync" title="AnkiConnect jetzt abfragen">${icon('refresh', 12)} Sync</button>
+            <button class="btn btn-xs btn-primary" id="btn-anki-row-log" title="Echte Anki-Zeit eintragen">${icon('check', 12)} Loggen</button>
+          </div>
+        </div>
 
         <div class="check-list">
           ${todayItems.map((it) => `
@@ -449,15 +478,16 @@ export function renderTodayView(root, { toast, navigate, promptLogFromChecklist 
                   ${moduleOptions}
                 </select>
               </div>
-              <div class="field">
+              <div class="field" id="en-act-field">
                 <label>Tätigkeit (für KI)</label>
                 <select id="en-act" class="input">
                   <option value="">Allgemein</option>
                   <option value="video">VL-Video durcharbeiten</option>
                   <option value="review">VL nacharbeiten & Ankis</option>
                   <option value="homework">Hausaufgabe (Verständnis)</option>
-                  <option value="anki">Anki-Reviews</option>
                   <option value="exam">Altklausur / Üben</option>
+                  <option value="anki" hidden>Anki-Reviews (fest)</option>
+                  <option value="prod" hidden>Vorlesung / Produktiv (fest)</option>
                 </select>
               </div>
             </div>
@@ -742,13 +772,26 @@ export function renderTodayView(root, { toast, navigate, promptLogFromChecklist 
     if (val) { store.setWakeTime(today, val); toast(`Aufwachzeit ${val} gespeichert.`, 'ok'); }
   });
 
-  // Anki
-  root.querySelector('#btn-anki-sync')?.addEventListener('click', async () => {
+  // Anki (both Hero Auto-Anki row & Anki card)
+  const triggerAnkiSync = async () => {
     try {
       const res = await syncAnkiConnect();
       toast(`AnkiConnect: ${res.totalDue} fällige Karten (${res.deckCount} Decks).`, 'ok');
     } catch (err) {
       toast(`AnkiConnect nicht erreichbar (${err.message}).`, 'err');
+    }
+  };
+  root.querySelector('#btn-anki-sync')?.addEventListener('click', triggerAnkiSync);
+  root.querySelector('#btn-anki-row-sync')?.addEventListener('click', triggerAnkiSync);
+  root.querySelector('#btn-anki-row-log')?.addEventListener('click', () => {
+    if (promptLogFromChecklist) {
+      promptLogFromChecklist({
+        id: 'anki_daily',
+        title: `Heutige Anki-Reviews (${anki.totalDue} Karten)`,
+        kind: 'a',
+        estMin: anki.estMinutes || minDailyAnki,
+        done: true
+      });
     }
   });
 
@@ -766,16 +809,46 @@ export function renderTodayView(root, { toast, navigate, promptLogFromChecklist 
     toast('Anki-Karten (Blau/Rot/Grün) gespeichert.', 'ok');
   });
 
-  // Entry form
+  // Entry form: lock Tätigkeit when Art is Anki ('a') or Vorlesung ('p')
+  const enKindEl = root.querySelector('#en-kind');
+  const enActEl = root.querySelector('#en-act');
+  let lastLearnAct = '';
+
+  const syncEntryActLock = () => {
+    if (!enKindEl || !enActEl) return;
+    const kind = enKindEl.value;
+    if (kind === 'a') {
+      if (enActEl.value !== 'anki' && enActEl.value !== 'prod') lastLearnAct = enActEl.value;
+      enActEl.value = 'anki';
+      enActEl.disabled = true;
+      enActEl.style.opacity = '0.55';
+    } else if (kind === 'p') {
+      if (enActEl.value !== 'anki' && enActEl.value !== 'prod') lastLearnAct = enActEl.value;
+      enActEl.value = 'prod';
+      enActEl.disabled = true;
+      enActEl.style.opacity = '0.55';
+    } else {
+      enActEl.disabled = false;
+      enActEl.style.opacity = '';
+      if (enActEl.value === 'anki' || enActEl.value === 'prod') {
+        enActEl.value = lastLearnAct || '';
+      }
+    }
+  };
+  enKindEl?.addEventListener('change', syncEntryActLock);
+  syncEntryActLock();
+
   root.querySelector('#entry-form')?.addEventListener('submit', (e) => {
     e.preventDefault();
+    const kind = root.querySelector('#en-kind').value;
+    const act = kind === 'a' ? 'anki' : kind === 'p' ? '' : root.querySelector('#en-act').value;
     const res = store.addEntry({
       d: root.querySelector('#en-date').value,
       t: root.querySelector('#en-time').value,
-      k: root.querySelector('#en-kind').value,
+      k: kind,
       m: root.querySelector('#en-min').value,
       mod: root.querySelector('#en-mod').value,
-      act: root.querySelector('#en-act').value,
+      act,
       note: root.querySelector('#en-note').value
     });
     lastEntryFeedback = res.message;
@@ -839,10 +912,10 @@ export function renderTodayView(root, { toast, navigate, promptLogFromChecklist 
 
   // Timer controls
   root.querySelectorAll('[data-tmode]').forEach((btn) => {
-    btn.addEventListener('click', () => { selectedTimerMode = btn.getAttribute('data-tmode'); renderTodayView(root, { toast, navigate }); });
+    btn.addEventListener('click', () => { selectedTimerMode = btn.getAttribute('data-tmode'); renderTodayView(root, ctx); });
   });
   root.querySelectorAll('[data-tkind]').forEach((btn) => {
-    btn.addEventListener('click', () => { selectedTimerKind = btn.getAttribute('data-tkind'); renderTodayView(root, { toast, navigate }); });
+    btn.addEventListener('click', () => { selectedTimerKind = btn.getAttribute('data-tkind'); renderTodayView(root, ctx); });
   });
   root.querySelectorAll('[data-tmin]').forEach((btn) => {
     btn.addEventListener('click', () => {

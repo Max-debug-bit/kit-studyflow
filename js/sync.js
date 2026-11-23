@@ -2,9 +2,9 @@
 // Merges entries, caffeine, checklist, backlog, reminders, customEvents, maps & tombstones
 // so simultaneous offline edits on Win 11 Firefox & Pixel 9a Chrome NEVER overwrite each other!
 
-import { store } from './store.js';
+import { store, toDateStr } from './store.js';
 import { syncModulesFromIcs } from './ics.js';
-import { reconcileBacklogStatus } from './checklist.js';
+import { reconcileBacklogStatus, syncDayLecturesToProductive } from './checklist.js';
 
 const STATE_FILENAME = 'kit-studyflow-state.json';
 const ICS_FILENAME = 'kit-calendar.ics';
@@ -22,6 +22,14 @@ export function getIsoWeekKey(date = new Date()) {
 
 let debounceTimer = null;
 let isSyncing = false;
+let pendingLocalChange = false;
+let syncQueued = false;
+const statusListeners = new Set();
+
+export function onSyncStatusChange(fn) {
+  statusListeners.add(fn);
+  return () => statusListeners.delete(fn);
+}
 
 function authHeaders(token) {
   return {
@@ -41,6 +49,16 @@ function buildSyncPayload() {
     clone.ai.apiKey = '';
   }
   return clone;
+}
+
+function canonicalSyncSig(stateRaw) {
+  const s = store._mergeDefaults(stateRaw || {});
+  const clone = JSON.parse(JSON.stringify(s));
+  delete clone.updatedAt;
+  delete clone.dg;
+  delete clone.ui;
+  if (clone.ai) delete clone.ai.apiKey;
+  return JSON.stringify(clone);
 }
 
 // ---------- Conflict-Safe 2-Way Field-Level Merge ----------
@@ -108,25 +126,120 @@ export function mergeStates(localRaw, remoteRaw) {
     return Array.from(map.values());
   };
 
-  // 4. Key-value maps: union of all keys, primary wins on same-key conflict
+  // 4. Per-key timestamped maps (supports edits AND deletions across devices without global updatedAt clobbering)
+  const mergedMapMeta = {};
+  const mergeTimestampedMap = (mapName) => {
+    const lMap = local[mapName] || {};
+    const rMap = remote[mapName] || {};
+    const lMeta = local.mapMeta?.[mapName] || {};
+    const rMeta = remote.mapMeta?.[mapName] || {};
+    const out = {};
+    const outMeta = {};
+    const keys = new Set([
+      ...Object.keys(lMap),
+      ...Object.keys(rMap),
+      ...Object.keys(lMeta),
+      ...Object.keys(rMeta)
+    ]);
+
+    for (const k of keys) {
+      const lHas = Object.prototype.hasOwnProperty.call(lMap, k) && lMap[k] !== undefined;
+      const rHas = Object.prototype.hasOwnProperty.call(rMap, k) && rMap[k] !== undefined;
+      const lExplicit = lMeta[k] || 0;
+      const rExplicit = rMeta[k] || 0;
+
+      let winner;
+      if (lExplicit || rExplicit) {
+        const lTs = lExplicit || (lHas ? (local.updatedAt || 1) : 0);
+        const rTs = rExplicit || (rHas ? (remote.updatedAt || 1) : 0);
+        if (lTs > rTs) winner = 'local';
+        else if (rTs > lTs) winner = 'remote';
+        else winner = remoteNewer ? 'remote' : 'local';
+        outMeta[k] = Math.max(lExplicit, rExplicit);
+      } else {
+        if (lHas && !rHas) winner = 'local';
+        else if (rHas && !lHas) winner = 'remote';
+        else winner = remoteNewer ? 'remote' : 'local';
+      }
+
+      const val = winner === 'local' ? lMap[k] : rMap[k];
+      if (val !== undefined) out[k] = val;
+    }
+
+    if (Object.keys(outMeta).length) mergedMapMeta[mapName] = outMeta;
+    return out;
+  };
+
+  // Simple union map (monotonic flags like autopilotHandled)
   const mergeMap = (secMap = {}, priMap = {}) => ({ ...secMap, ...priMap });
 
-  // Merge modules preserving newer/richer module settings
+  // 5. Smart Anki merge by dedicated anki.updatedAt / anki.lastSyncAt (never wiped by mobile's empty default decks)
+  const mergeAnki = (lAnki = {}, rAnki = {}) => {
+    const lSync = lAnki.lastSyncAt || 0;
+    const rSync = rAnki.lastSyncAt || 0;
+    const lTs = Math.max(lAnki.updatedAt || 0, lSync);
+    const rTs = Math.max(rAnki.updatedAt || 0, rSync);
+
+    const lHasDecks = Array.isArray(lAnki.decks) && lAnki.decks.length > 0;
+    const rHasDecks = Array.isArray(rAnki.decks) && rAnki.decks.length > 0;
+    const lHasManual = (lAnki.manualNew || 0) + (lAnki.manualLearn || 0) + (lAnki.manualReview || 0) + (lAnki.manualDue || 0) > 0;
+    const rHasManual = (rAnki.manualNew || 0) + (rAnki.manualLearn || 0) + (rAnki.manualReview || 0) + (rAnki.manualDue || 0) > 0;
+
+    let pickRemote;
+    if (rTs !== lTs) pickRemote = rTs > lTs;
+    else if (rHasDecks !== lHasDecks) pickRemote = rHasDecks;
+    else if (rHasManual !== lHasManual) pickRemote = rHasManual;
+    else pickRemote = remoteNewer;
+
+    const win = pickRemote ? rAnki : lAnki;
+    const lose = pickRemote ? lAnki : rAnki;
+    const merged = { ...lose, ...win };
+
+    // Always keep the freshest real AnkiConnect deck snapshot
+    if (rSync > lSync || (rHasDecks && !lHasDecks && rSync >= lSync)) {
+      merged.decks = rAnki.decks;
+      merged.lastSyncAt = rSync;
+      if (rAnki.todayMinutes !== undefined) merged.todayMinutes = rAnki.todayMinutes;
+    } else if (lSync > rSync || (lHasDecks && !rHasDecks && lSync >= rSync)) {
+      merged.decks = lAnki.decks;
+      merged.lastSyncAt = lSync;
+      if (lAnki.todayMinutes !== undefined) merged.todayMinutes = lAnki.todayMinutes;
+    }
+
+    merged.updatedAt = Math.max(lTs, rTs);
+    return merged;
+  };
+
+  // Merge modules per-key via mapMeta + tombstone support
+  const modulesRaw = mergeTimestampedMap('modules');
   const modules = {};
-  const allModKeys = new Set([...Object.keys(secondary.modules || {}), ...Object.keys(primary.modules || {})]);
-  for (const k of allModKeys) {
-    if (isDeleted(`mod_${k}`, 0)) continue;
-    modules[k] = { ...(secondary.modules?.[k] || {}), ...(primary.modules?.[k] || {}) };
+  for (const k of Object.keys(modulesRaw)) {
+    if (isDeleted(`mod_${k}`, mergedMapMeta.modules?.[k] || 0)) continue;
+    if (modulesRaw[k] && typeof modulesRaw[k] === 'object') {
+      modules[k] = modulesRaw[k];
+    }
   }
 
-  // Keep local Gemini API key if remote stripped it
+  // Merge AI chat by message timestamp+role (respecting chatClearedAt) & keep local Gemini API key if remote stripped it
+  const chatClearedAt = Math.max(local.ai?.chatClearedAt || 0, remote.ai?.chatClearedAt || 0);
+  const chatMap = new Map();
+  for (const m of [...(secondary.ai?.chat || []), ...(primary.ai?.chat || [])]) {
+    if (!m || !m.text) continue;
+    if (chatClearedAt && (m.ts || 0) <= chatClearedAt) continue;
+    const key = `${m.ts || 0}|${m.role}|${String(m.text).slice(0, 60)}`;
+    const prev = chatMap.get(key);
+    chatMap.set(key, prev ? { ...prev, ...m, applied: Boolean(prev.applied || m.applied), rhythmApplied: Boolean(prev.rhythmApplied || m.rhythmApplied) } : { ...m });
+  }
+  const mergedChat = Array.from(chatMap.values())
+    .sort((a, b) => (a.ts || 0) - (b.ts || 0))
+    .slice(-30);
+
   const mergedAi = {
     ...secondary.ai,
     ...primary.ai,
     apiKey: primary.ai?.apiKey || secondary.ai?.apiKey || '',
-    chat: (primary.ai?.chat?.length || 0) >= (secondary.ai?.chat?.length || 0)
-      ? (primary.ai?.chat || [])
-      : (secondary.ai?.chat || [])
+    chatClearedAt,
+    chat: mergedChat
   };
 
   // Keep whichever ICS is fresher
@@ -137,14 +250,16 @@ export function mergeStates(localRaw, remoteRaw) {
     schemaVersion: Math.max(local.schemaVersion || 2, remote.schemaVersion || 2, 2),
     e: mergeByIdAppend(primary.e, secondary.e),
     cf: mergeByIdAppend(primary.cf, secondary.cf),
-    w: mergeMap(secondary.w, primary.w),
-    sx: mergeMap(secondary.sx, primary.sx),
-    lectureAttendance: mergeMap(secondary.lectureAttendance, primary.lectureAttendance),
-    eventOverrides: mergeMap(secondary.eventOverrides, primary.eventOverrides),
-    restDays: mergeMap(secondary.restDays, primary.restDays),
+    w: mergeTimestampedMap('w'),
+    sx: mergeTimestampedMap('sx'),
+    lectureAttendance: mergeTimestampedMap('lectureAttendance'),
+    eventOverrides: mergeTimestampedMap('eventOverrides'),
+    restDays: mergeTimestampedMap('restDays'),
     autopilotHandled: mergeMap(secondary.autopilotHandled, primary.autopilotHandled),
-    dayNotes: mergeMap(secondary.dayNotes, primary.dayNotes),
+    dayNotes: mergeTimestampedMap('dayNotes'),
+    mapMeta: mergedMapMeta,
     modules,
+    anki: mergeAnki(local.anki, remote.anki),
     backlog: mergeMutableById(local.backlog, remote.backlog),
     checklist: mergeMutableById(local.checklist, remote.checklist),
     reminders: mergeMutableById(local.reminders, remote.reminders),
@@ -155,7 +270,7 @@ export function mergeStates(localRaw, remoteRaw) {
     ai: mergedAi,
     icsRaw: useRemoteIcs ? (remote.icsRaw || local.icsRaw) : (local.icsRaw || remote.icsRaw),
     icsUpdatedAt: Math.max(local.icsUpdatedAt || 0, remote.icsUpdatedAt || 0),
-    updatedAt: Math.max(local.updatedAt || 0, remote.updatedAt || 0, Date.now())
+    updatedAt: Math.max(local.updatedAt || 0, remote.updatedAt || 0)
   };
 
   return store._mergeDefaults(result);
@@ -168,6 +283,7 @@ export async function createPrivateGist() {
   setSyncStatus('syncing', '');
   const res = await fetch('https://api.github.com/gists', {
     method: 'POST',
+    cache: 'no-store',
     headers: authHeaders(token),
     body: JSON.stringify({
       description: 'KIT StudyFlow – Privater Cloud-Sync (Fokus-Tracker & Wochenplan)',
@@ -189,11 +305,12 @@ export async function createPrivateGist() {
   const data = await res.json();
   store.secrets.gistId = data.id;
   store.secrets.lastSyncAt = Date.now();
+  pendingLocalChange = false;
   setSyncStatus('ok', '');
   return data.id;
 }
 
-export async function pushToGist({ forceArchive = false } = {}) {
+export async function pushToGist({ forceArchive = false, keepalive = false } = {}) {
   if (!isGistConfigured()) return { ok: false, reason: 'not_configured' };
   const token = store.secrets.githubToken.trim();
   let gistId = (store.secrets.gistId || '').trim();
@@ -203,14 +320,14 @@ export async function pushToGist({ forceArchive = false } = {}) {
     return { ok: true, gistId, created: true };
   }
 
-  if (isSyncing) return { ok: false, reason: 'busy' };
+  if (isSyncing && !keepalive) return { ok: false, reason: 'busy' };
   isSyncing = true;
   setSyncStatus('syncing', '');
 
   try {
     const payloadStr = JSON.stringify(buildSyncPayload(), null, 2);
     const weekKey = getIsoWeekKey();
-    const shouldWriteArchive = forceArchive || store.secrets.lastArchiveWeek !== weekKey;
+    const shouldWriteArchive = !keepalive && (forceArchive || store.secrets.lastArchiveWeek !== weekKey);
     const filesBody = {
       [STATE_FILENAME]: { content: payloadStr }
     };
@@ -219,10 +336,16 @@ export async function pushToGist({ forceArchive = false } = {}) {
       filesBody[`${ARCHIVE_PREFIX}${weekKey}.json`] = { content: payloadStr };
     }
 
+    const bodyStr = JSON.stringify({ files: filesBody });
+    // keepalive has a ~64KB browser payload cap; fall back to normal fetch if larger
+    const useKeepalive = keepalive && bodyStr.length < 58000;
+
     const res = await fetch(`https://api.github.com/gists/${encodeURIComponent(gistId)}`, {
       method: 'PATCH',
+      cache: 'no-store',
+      keepalive: useKeepalive,
       headers: authHeaders(token),
-      body: JSON.stringify({ files: filesBody })
+      body: bodyStr
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
@@ -241,6 +364,7 @@ export async function pushToGist({ forceArchive = false } = {}) {
           for (const fn of toDelete) delFiles[fn] = null;
           await fetch(`https://api.github.com/gists/${encodeURIComponent(gistId)}`, {
             method: 'PATCH',
+            cache: 'no-store',
             headers: authHeaders(token),
             body: JSON.stringify({ files: delFiles })
           });
@@ -248,6 +372,7 @@ export async function pushToGist({ forceArchive = false } = {}) {
       } catch { /* non-fatal */ }
     }
 
+    pendingLocalChange = false;
     store.secrets.lastSyncAt = Date.now();
     setSyncStatus('ok', '');
     return { ok: true, gistId, archivedWeek: shouldWriteArchive ? weekKey : '' };
@@ -265,7 +390,7 @@ export async function listGistArchives() {
   }
   const res = await fetch(
     `https://api.github.com/gists/${encodeURIComponent(store.secrets.gistId.trim())}`,
-    { headers: authHeaders(store.secrets.githubToken) }
+    { cache: 'no-store', headers: authHeaders(store.secrets.githubToken) }
   );
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const gist = await res.json();
@@ -295,6 +420,15 @@ export function restoreArchiveSnapshot(jsonContent, label = 'Wochen-Archiv') {
   return { entries: store.state.e.length, checklist: store.state.checklist.length };
 }
 
+async function readGistFileContent(fileObj) {
+  if (!fileObj) return '';
+  if (fileObj.truncated && fileObj.raw_url) {
+    const rawRes = await fetch(fileObj.raw_url, { cache: 'no-store' });
+    if (rawRes.ok) return await rawRes.text();
+  }
+  return fileObj.content || '';
+}
+
 export async function pullFromGist({ preferRemote = false } = {}) {
   if (!isGistConfigured() || !store.secrets.gistId) {
     return { ok: false, reason: 'not_configured' };
@@ -306,7 +440,7 @@ export async function pullFromGist({ preferRemote = false } = {}) {
   try {
     const res = await fetch(
       `https://api.github.com/gists/${encodeURIComponent(store.secrets.gistId.trim())}`,
-      { headers: authHeaders(store.secrets.githubToken) }
+      { cache: 'no-store', headers: authHeaders(store.secrets.githubToken) }
     );
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const gist = await res.json();
@@ -316,50 +450,37 @@ export async function pullFromGist({ preferRemote = false } = {}) {
     let updatedState = false;
     let needsPushBack = false;
 
-    if (files[STATE_FILENAME]?.content) {
-      const remoteState = JSON.parse(files[STATE_FILENAME].content);
+    const stateContent = await readGistFileContent(files[STATE_FILENAME]);
+    if (stateContent) {
+      const remoteState = JSON.parse(stateContent);
       if (preferRemote) {
         const localKey = store.state.ai?.apiKey || '';
         const next = store._mergeDefaults(remoteState);
         if (!next.ai.apiKey && localKey) next.ai.apiKey = localKey;
         store.state = next;
         reconcileBacklogStatus();
-        store.save({ skipSync: true });
+        if (store.state.autoLogLectures) syncDayLecturesToProductive(toDateStr(), { save: false });
+        store.save({ skipSync: true, preserveTimestamp: true });
         updatedState = true;
       } else {
-        const beforeSig = JSON.stringify({
-          e: store.state.e.length,
-          cf: store.state.cf.length,
-          chk: store.state.checklist.length,
-          bl: store.state.backlog.length,
-          u: store.state.updatedAt
-        });
+        const localBeforeSig = canonicalSyncSig(store.state);
+        const remoteSig = canonicalSyncSig(remoteState);
         const merged = mergeStates(store.state, remoteState);
         store.state = merged;
         reconcileBacklogStatus();
-        store.save({ skipSync: true });
-        updatedState = true;
-        const remoteSig = JSON.stringify({
-          e: (remoteState.e || []).length,
-          cf: (remoteState.cf || []).length,
-          chk: (remoteState.checklist || []).length,
-          bl: (remoteState.backlog || []).length,
-          u: remoteState.updatedAt || 0
-        });
-        const afterSig = JSON.stringify({
-          e: store.state.e.length,
-          cf: store.state.cf.length,
-          chk: store.state.checklist.length,
-          bl: store.state.backlog.length,
-          u: store.state.updatedAt
-        });
-        needsPushBack = afterSig !== remoteSig || beforeSig !== remoteSig;
+        if (store.state.autoLogLectures) syncDayLecturesToProductive(toDateStr(), { save: false });
+        const afterSig = canonicalSyncSig(store.state);
+        updatedState = afterSig !== localBeforeSig;
+        needsPushBack = afterSig !== remoteSig;
+        if (updatedState) {
+          store.save({ skipSync: true, preserveTimestamp: true });
+        }
       }
     }
 
-    if (files[ICS_FILENAME]?.content) {
-      const remoteIcs = files[ICS_FILENAME].content;
-      if (remoteIcs && remoteIcs !== store.state.icsRaw && remoteIcs.includes('BEGIN:VEVENT')) {
+    const remoteIcs = await readGistFileContent(files[ICS_FILENAME]);
+    if (remoteIcs) {
+      if (remoteIcs !== store.state.icsRaw && remoteIcs.includes('BEGIN:VEVENT')) {
         syncModulesFromIcs(store, remoteIcs);
         updatedIcs = true;
       }
@@ -382,24 +503,53 @@ export async function syncNow() {
     const id = await createPrivateGist();
     return { ok: true, created: true, gistId: id };
   }
-  const pulled = await pullFromGist({ preferRemote: false });
-  if (!pulled.ok) return pulled;
-  if (pulled.needsPushBack) {
-    return await pushToGist();
+  if (isSyncing) {
+    syncQueued = true;
+    return { ok: true, queued: true };
   }
-  return { ok: true, merged: true, updatedIcs: pulled.updatedIcs };
+  const pulled = await pullFromGist({ preferRemote: false });
+  let result = pulled;
+  if (pulled.ok && (pulled.needsPushBack || pendingLocalChange)) {
+    const pushed = await pushToGist();
+    result = pushed.ok
+      ? { ok: true, merged: true, pushed: true, updatedState: pulled.updatedState, updatedIcs: pulled.updatedIcs }
+      : pushed;
+  } else if (pulled.ok) {
+    result = { ok: true, merged: true, updatedState: pulled.updatedState, updatedIcs: pulled.updatedIcs };
+  }
+
+  // Drain any edit that arrived while this sync was in flight so nothing is EVER dropped!
+  if (syncQueued) {
+    syncQueued = false;
+    setTimeout(() => syncNow(), 120);
+  }
+  return result;
 }
 
 export function scheduleAutoSync() {
   if (!isGistConfigured() || !store.secrets.autoSync || !store.secrets.gistId) return;
+  pendingLocalChange = true;
   clearTimeout(debounceTimer);
   debounceTimer = setTimeout(() => {
+    debounceTimer = null;
     syncNow();
-  }, 2400);
+  }, 650);
+}
+
+export function flushPendingSync() {
+  if (!isGistConfigured() || !store.secrets.autoSync || !store.secrets.gistId) return;
+  if (!pendingLocalChange && !debounceTimer) return;
+  clearTimeout(debounceTimer);
+  debounceTimer = null;
+  // Fire immediate keepalive PATCH so phone screen-lock / app-switch never drops the edit
+  pushToGist({ keepalive: true });
 }
 
 function setSyncStatus(status, error = '') {
   store.secrets.lastSyncStatus = status;
   store.secrets.lastSyncError = error;
-  store.saveSecrets();
+  store.saveSecrets({ silent: true });
+  statusListeners.forEach((fn) => {
+    try { fn(status, error); } catch { /* ignore */ }
+  });
 }

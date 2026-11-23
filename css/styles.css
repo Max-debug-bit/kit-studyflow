@@ -901,19 +901,25 @@ textarea.input { resize: vertical; min-height: 82px; }
 }
 
 .msg {
-  padding: 11px 14px;
+  padding: 10px 14px;
   border-radius: 12px;
-  max-width: 92%;
-  line-height: 1.52;
+  max-width: 88%;
+  line-height: 1.5;
   font-size: 0.9rem;
+  word-break: break-word;
+  flex-shrink: 0;
+}
+
+.msg-text {
   white-space: pre-wrap;
   word-break: break-word;
 }
 
 .msg.user {
   align-self: flex-end;
-  background: var(--accent);
-  color: var(--accent-fg);
+  background: var(--bg-hover);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
   border-bottom-right-radius: 3px;
 }
 

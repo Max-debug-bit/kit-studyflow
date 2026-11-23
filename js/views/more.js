@@ -12,7 +12,7 @@ import {
 import { AVAILABLE_MODELS, testGeminiConnection } from '../gemini.js';
 import { createPrivateGist, pullFromGist, pushToGist, syncNow, listGistArchives, restoreArchiveSnapshot } from '../sync.js';
 import { syncModulesFromIcs } from '../ics.js';
-import { syncAnkiConnect, setManualAnki } from '../anki.js';
+import { syncAnkiConnect, setManualAnki, getAnkiLoadSummary } from '../anki.js';
 import { renderQrSvg, encodePairingCode } from '../qr.js';
 import { icon } from '../icons.js';
 
@@ -34,6 +34,7 @@ function esc(str) {
 export function renderMoreView(root, ctx) {
   const { toast, applyTheme, openModal, closeModal, handlePairingCodeFlow } = ctx;
   const st = store.getOverallStats();
+  const anki = getAnkiLoadSummary();
   const todayLearn = store.getDayBreakdown(toDateStr()).learnTotal;
 
   const bestWdIdx = st.weekdayAvgs.indexOf(Math.max(...st.weekdayAvgs));
@@ -208,6 +209,10 @@ export function renderMoreView(root, ctx) {
               ${store.secrets.lastSyncAt ? `Sync ${toTimeStr(new Date(store.secrets.lastSyncAt))}` : 'Lokal'}
             </span>
           </div>
+          <div class="xs muted mono" style="margin:-4px 0 10px;">
+            Sync-Umfang: ${store.state.e.length} Zeiten · ${(store.state.checklist || []).length} Todos · ${(store.state.backlog || []).length} Rückstände · ${Object.keys(store.state.eventOverrides || {}).length} Ausfälle/Overrides · ${anki.totalDue} Ankis
+            ${store.secrets.lastSyncError ? `<span style="color:var(--danger);"> · Fehler: ${esc(store.secrets.lastSyncError)}</span>` : ''}
+          </div>
           <div class="field-grid" style="margin-bottom:10px;">
             <div class="field"><label>GitHub Token (Classic, Scope: <code>gist</code>)</label><input type="password" id="s-ghtoken" class="input mono" value="${esc(store.secrets.githubToken || '')}" placeholder="ghp_..." autocomplete="off" /></div>
             <div class="field"><label>Privater Gist-ID</label><input type="text" id="s-gistid" class="input mono" value="${esc(store.secrets.gistId || '')}" placeholder="leer lassen zum Neuerstellen" /></div>
@@ -380,17 +385,25 @@ export function renderMoreView(root, ctx) {
   root.querySelector('#btn-save-gist')?.addEventListener('click', () => { saveGistInputs(); toast('Gespeichert.', 'ok'); });
   root.querySelector('#btn-create-gist')?.addEventListener('click', async () => {
     saveGistInputs();
-    try { toast(`Privater Gist erstellt: ${await createPrivateGist()}`, 'ok'); } catch (err) { toast(err.message, 'err'); }
+    try {
+      const id = await createPrivateGist();
+      renderMoreView(root, ctx);
+      toast(`Privater Gist erstellt: ${id}`, 'ok');
+    } catch (err) {
+      toast(err.message, 'err');
+    }
   });
   root.querySelector('#btn-sync-now')?.addEventListener('click', async () => {
     saveGistInputs();
     const res = await syncNow();
+    renderMoreView(root, ctx);
     if (res.ok) toast('Synchronisiert.', 'ok');
     else toast(`Fehler: ${res.error || res.reason}`, 'err');
   });
   root.querySelector('#btn-pull-gist')?.addEventListener('click', async () => {
     saveGistInputs();
     const res = await pullFromGist({ preferRemote: true });
+    renderMoreView(root, ctx);
     if (res.ok) toast('Aus Cloud geladen.', 'ok');
     else toast(`Fehler: ${res.error || res.reason}`, 'err');
   });
