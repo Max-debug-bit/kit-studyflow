@@ -1,0 +1,63 @@
+name: Sync KIT WebCal to Private Gist
+
+on:
+  schedule:
+    - cron: '0 */6 * * *' # Alle 6 Stunden automatisch aktualisieren
+  workflow_dispatch:      # Jederzeit manuell über GitHub UI startbar
+
+jobs:
+  sync-ics:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch KIT WebCal and update private Gist
+        env:
+          KIT_WEBCAL_URL: ${{ secrets.KIT_WEBCAL_URL }}
+          GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
+          GIST_ID: ${{ secrets.GIST_ID }}
+        run: |
+          python3 - <<'PY'
+          import json, os, sys, urllib.request
+
+          webcal_url = os.environ.get("KIT_WEBCAL_URL", "").strip()
+          token = os.environ.get("GIST_TOKEN", "").strip()
+          gist_id = os.environ.get("GIST_ID", "").strip()
+
+          if not webcal_url or not token or not gist_id:
+              print("Fehlende Secrets: Bitte KIT_WEBCAL_URL, GIST_TOKEN und GIST_ID unter Settings -> Secrets -> Actions anlegen.")
+              sys.exit(1)
+
+          if webcal_url.startswith("webcal://"):
+              webcal_url = "https://" + webcal_url[len("webcal://"):]
+
+          print("Lade KIT-Kalender...")
+          req = urllib.request.Request(webcal_url, headers={"User-Agent": "KIT-StudyFlow-Sync/1.0"})
+          with urllib.request.urlopen(req, timeout=30) as resp:
+              ics_text = resp.read().decode("utf-8", errors="replace")
+
+          if "BEGIN:VCALENDAR" not in ics_text:
+              print("Antwort sieht nicht nach gültiger .ics-Datei aus!")
+              sys.exit(1)
+
+          print(f"Kalender geladen ({len(ics_text)} Zeichen). Aktualisiere privaten Gist...")
+          payload = json.dumps({
+              "files": {
+                  "kit-calendar.ics": {
+                      "content": ics_text
+                  }
+              }
+          }).encode("utf-8")
+
+          patch_req = urllib.request.Request(
+              f"https://api.github.com/gists/{gist_id}",
+              data=payload,
+              method="PATCH",
+              headers={
+                  "Authorization": f"Bearer {token}",
+                  "Accept": "application/vnd.github+json",
+                  "Content-Type": "application/json",
+                  "User-Agent": "KIT-StudyFlow-Sync/1.0"
+              }
+          )
+          with urllib.request.urlopen(patch_req, timeout=30) as resp:
+              print("Erfolgreich synchronisiert! HTTP", resp.status)
+          PY
