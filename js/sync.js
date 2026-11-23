@@ -59,7 +59,9 @@ export function isGistConfigured() {
 
 function summarizeStateCounts(sRaw) {
   const s = sRaw || {};
-  const decks = Array.isArray(s.anki?.decks) ? s.anki.decks : [];
+  const excluded = new Set(Array.isArray(s.anki?.excludedDecks) ? s.anki.excludedDecks : []);
+  const decks = (Array.isArray(s.anki?.decks) ? s.anki.decks : [])
+    .filter((d) => d && !excluded.has(d.fullName || d.name) && !excluded.has(d.name));
   const deckDue = decks.reduce((sum, d) => sum + (Number(d?.due) || 0), 0);
   const manualDue = (Number(s.anki?.manualNew) || 0) + (Number(s.anki?.manualLearn) || 0) + (Number(s.anki?.manualReview) || 0);
   return {

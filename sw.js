@@ -1,4 +1,4 @@
-const CACHE_NAME = 'kit-studyflow-v12';
+const CACHE_NAME = 'kit-studyflow-v13';
 const ASSETS = [
   './',
   './index.html',

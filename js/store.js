@@ -153,7 +153,8 @@ export function createDefaultState() {
       manualReview: 0,      // Grün
       manualDue: 0,         // legacy fallback
       todayMinutes: 0,
-      decks: []     // { name, due, newCards, learnCards, reviewCards }
+      decks: [],    // { name, fullName, group, due, newCards, learnCards, reviewCards }
+      excludedDecks: [] // deck names/fullNames manually hidden from count & time
     },
     planningPrefs: {
       defaultWakeFreeDay: '10:00',

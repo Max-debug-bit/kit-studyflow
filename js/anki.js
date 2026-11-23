@@ -46,10 +46,18 @@ export async function syncAnkiConnect({ alsoLogStudyTime = false } = {}) {
   }
 
   // Exclude parent/container decks that have subdecks (e.g. "Studium" when "Studium::Werkstoffkunde" exists)
-  const leafFullNames = allFullNames.filter((name) => {
+  const parentFullNames = new Set();
+  const parentShortNames = new Set();
+  for (const name of allFullNames) {
     const prefix = `${name}::`;
-    return !allFullNames.some((other) => other.startsWith(prefix));
-  });
+    if (allFullNames.some((other) => other.startsWith(prefix))) {
+      parentFullNames.add(name);
+      const parts = name.split('::');
+      parentShortNames.add(parts[parts.length - 1]);
+    }
+  }
+
+  const leafFullNames = allFullNames.filter((name) => !parentFullNames.has(name));
 
   const statsMap = leafFullNames.length
     ? await ankiInvoke('getDeckStats', { decks: leafFullNames }, url)
@@ -61,6 +69,7 @@ export async function syncAnkiConnect({ alsoLogStudyTime = false } = {}) {
     if (!d) continue;
     const fullName = idToFullName[String(d.deck_id ?? key)] || d.name || '';
     if (!fullName) continue;
+    if (parentFullNames.has(fullName)) continue;
     const parts = fullName.split('::');
     const shortName = parts[parts.length - 1];
     const group = parts.length > 1 ? parts.slice(0, -1).join(' / ') : '';
@@ -104,7 +113,8 @@ export async function syncAnkiConnect({ alsoLogStudyTime = false } = {}) {
   const summary = getAnkiLoadSummary();
   return {
     ok: true,
-    deckCount: decks.length,
+    deckCount: summary.allDecks ? summary.allDecks.length : decks.length,
+    filteredParents: Array.from(parentFullNames),
     totalDue: summary.totalDue,
     newCards: summary.totalNew,
     learnCards: summary.totalLearn,
@@ -112,6 +122,17 @@ export async function syncAnkiConnect({ alsoLogStudyTime = false } = {}) {
     estMinutes: summary.estMinutes,
     todayMinutes
   };
+}
+
+export function toggleExcludedAnkiDeck(deckKey) {
+  const clean = String(deckKey || '').trim();
+  if (!clean) return;
+  if (!Array.isArray(store.state.anki.excludedDecks)) store.state.anki.excludedDecks = [];
+  const idx = store.state.anki.excludedDecks.indexOf(clean);
+  if (idx >= 0) store.state.anki.excludedDecks.splice(idx, 1);
+  else store.state.anki.excludedDecks.push(clean);
+  store.state.anki.updatedAt = Date.now();
+  store.save();
 }
 
 export function getAnkiLoadSummary() {
@@ -141,10 +162,12 @@ export function getAnkiLoadSummary() {
     };
   }
 
-  // Safety net: also guard against parent::child overlap using fullName (or legacy name)
+  // Safety net: guard against parent::child overlap AND honor manually excluded decks (e.g. "Studium" or "Spanisch")
+  const excludedSet = new Set(Array.isArray(anki.excludedDecks) ? anki.excludedDecks : []);
   const fullPaths = new Set(anki.decks.map((d) => d.fullName || d.name));
   const leafDecks = anki.decks.filter((d) => {
     const path = d.fullName || d.name;
+    if (excludedSet.has(path) || excludedSet.has(d.name)) return false;
     const prefix = `${path}::`;
     for (const other of fullPaths) {
       if (other.startsWith(prefix)) return false;
@@ -157,6 +180,7 @@ export function getAnkiLoadSummary() {
   const totalReview = leafDecks.reduce((s, d) => s + (d.reviewCards || 0), 0);
   const totalDue = totalNew + totalLearn + totalReview;
   const estMinutes = estimateAnkiMinutes({ newCards: totalNew, learnCards: totalLearn, reviewCards: totalReview });
+  const hasLegacyDecks = anki.decks.some((d) => !d.fullName);
 
   return {
     source: 'ankiconnect',
@@ -168,7 +192,9 @@ export function getAnkiLoadSummary() {
     estMinutes,
     weights,
     decks: leafDecks.filter((d) => d.due > 0).slice(0, 12),
-    allDecks: leafDecks
+    allDecks: leafDecks,
+    excludedDecks: Array.from(excludedSet),
+    hasLegacyDecks
   };
 }
 

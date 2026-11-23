@@ -28,7 +28,7 @@ import {
   setLectureAttendance,
   syncDayLecturesToProductive
 } from '../checklist.js';
-import { getAnkiLoadSummary, syncAnkiConnect, setManualAnki } from '../anki.js';
+import { getAnkiLoadSummary, syncAnkiConnect, setManualAnki, toggleExcludedAnkiDeck } from '../anki.js';
 import {
   renderDailyRingSVG,
   renderDayTimelineSVG,
@@ -335,8 +335,25 @@ export function renderTodayView(root, ctx) {
               ${anki.decks.slice(0, 8).map((d) => `
                 <div class="entry-row" style="padding:6px 10px;">
                   <span class="small">${d.group ? `<span class="xs soft">${esc(d.group)} / </span>` : ''}${esc(d.name)}</span>
-                  <span class="xs mono muted"><span class="anki-dot blue"></span>${d.newCards} · <span class="anki-dot red"></span>${d.learnCards || 0} · <span class="anki-dot green"></span>${d.reviewCards}</span>
+                  <div class="row" style="gap:6px;flex-wrap:nowrap;">
+                    <span class="xs mono muted"><span class="anki-dot blue"></span>${d.newCards} · <span class="anki-dot red"></span>${d.learnCards || 0} · <span class="anki-dot green"></span>${d.reviewCards}</span>
+                    <button class="btn btn-xs btn-ghost" data-anki-hide="${esc(d.fullName || d.name)}" title="Stapel aus Zählung ausblenden">${icon('x', 11)}</button>
+                  </div>
                 </div>
+              `).join('')}
+            </div>
+          ` : ''}
+
+          ${anki.hasLegacyDecks ? `
+            <div class="xs soft" style="margin-bottom:8px;">
+              Tipp: Bei geöffnetem Anki einmal <strong>Sync</strong> klicken, um Übergruppen automatisch zu trennen — oder Übergruppe per <strong>×</strong> ausblenden.
+            </div>
+          ` : ''}
+
+          ${(anki.excludedDecks || []).length ? `
+            <div class="chip-row" style="margin-bottom:10px;">
+              ${anki.excludedDecks.map((name) => `
+                <button class="chip" data-anki-unhide="${esc(name)}" title="Wieder einblenden">Ausgeblendet: ${esc(name)} ↺</button>
               `).join('')}
             </div>
           ` : ''}
@@ -780,11 +797,26 @@ export function renderTodayView(root, ctx) {
   const triggerAnkiSync = async () => {
     try {
       const res = await syncAnkiConnect();
-      toast(`AnkiConnect: ${res.totalDue} fällige Karten (${res.deckCount} Decks).`, 'ok');
+      const parentInfo = res.filteredParents?.length ? ` · Übergruppe ${res.filteredParents.join(', ')} gefiltert` : '';
+      toast(`AnkiConnect: ${res.totalDue} fällige Karten (${res.deckCount} Stapel${parentInfo}).`, 'ok');
     } catch (err) {
       toast(`AnkiConnect nicht erreichbar (${err.message}).`, 'err');
     }
   };
+  root.querySelectorAll('[data-anki-hide]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const name = btn.getAttribute('data-anki-hide');
+      toggleExcludedAnkiDeck(name);
+      toast(`„${name}“ aus der Anki-Zählung ausgeblendet.`, 'ok');
+    });
+  });
+  root.querySelectorAll('[data-anki-unhide]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const name = btn.getAttribute('data-anki-unhide');
+      toggleExcludedAnkiDeck(name);
+      toast(`„${name}“ wieder eingeblendet.`, 'ok');
+    });
+  });
   root.querySelector('#btn-anki-sync')?.addEventListener('click', triggerAnkiSync);
   root.querySelector('#btn-anki-row-sync')?.addEventListener('click', triggerAnkiSync);
   root.querySelector('#anki-row-toggle')?.addEventListener('click', () => {
