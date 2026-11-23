@@ -206,7 +206,7 @@ export function renderMoreView(root, ctx) {
           <div class="card-header">
             <h2 class="card-title">${icon('cloud', 15)} GitHub Gist Cloud-Sync (Win 11 ↔ Pixel 9a)</h2>
             <div class="row" style="gap:6px;">
-              <span class="pill">App v11</span>
+              <span class="pill">App v12</span>
               <span class="pill ${store.secrets.lastSyncStatus === 'ok' ? 'kit' : store.secrets.lastSyncStatus === 'err' ? 'danger' : ''}">
                 ${store.secrets.lastSyncAt ? `Sync ${toTimeStr(new Date(store.secrets.lastSyncAt))}` : 'Lokal'}
               </span>

@@ -34,19 +34,51 @@ export function estimateAnkiMinutes({ newCards = 0, learnCards = 0, reviewCards 
 
 export async function syncAnkiConnect({ alsoLogStudyTime = false } = {}) {
   const url = store.state.anki.url || 'http://127.0.0.1:8765';
-  const deckNames = await ankiInvoke('deckNames', {}, url);
-  const statsMap = await ankiInvoke('getDeckStats', { decks: deckNames }, url);
+
+  // Use deckNamesAndIds so we get the FULL hierarchical path ("Studium::Werkstoffkunde") mapped to deck_id.
+  // AnkiConnect's getDeckStats strips parent prefixes from d.name, which previously caused parent groups
+  // like "Studium" to be double-counted alongside their subdecks!
+  const nameToId = await ankiInvoke('deckNamesAndIds', {}, url);
+  const allFullNames = Object.keys(nameToId || {});
+  const idToFullName = {};
+  for (const fullName of allFullNames) {
+    idToFullName[String(nameToId[fullName])] = fullName;
+  }
+
+  // Exclude parent/container decks that have subdecks (e.g. "Studium" when "Studium::Werkstoffkunde" exists)
+  const leafFullNames = allFullNames.filter((name) => {
+    const prefix = `${name}::`;
+    return !allFullNames.some((other) => other.startsWith(prefix));
+  });
+
+  const statsMap = leafFullNames.length
+    ? await ankiInvoke('getDeckStats', { decks: leafFullNames }, url)
+    : {};
 
   const decks = [];
   for (const key of Object.keys(statsMap || {})) {
     const d = statsMap[key];
-    if (!d || !d.name) continue;
+    if (!d) continue;
+    const fullName = idToFullName[String(d.deck_id ?? key)] || d.name || '';
+    if (!fullName) continue;
+    const parts = fullName.split('::');
+    const shortName = parts[parts.length - 1];
+    const group = parts.length > 1 ? parts.slice(0, -1).join(' / ') : '';
+
     const newCards = Number(d.new_count) || 0;
     const learnCards = Number(d.learn_count) || 0;
     const reviewCards = Number(d.review_count) || 0;
     const due = newCards + learnCards + reviewCards;
-    if (d.name === 'Default' && due === 0) continue;
-    decks.push({ name: d.name, due, newCards, learnCards, reviewCards });
+    if (fullName === 'Default' && due === 0) continue;
+    decks.push({
+      name: shortName,
+      fullName,
+      group,
+      due,
+      newCards,
+      learnCards,
+      reviewCards
+    });
   }
   decks.sort((a, b) => b.due - a.due);
 
@@ -109,11 +141,12 @@ export function getAnkiLoadSummary() {
     };
   }
 
-  // Avoid double counting parent::child decks
-  const names = new Set(anki.decks.map((d) => d.name));
+  // Safety net: also guard against parent::child overlap using fullName (or legacy name)
+  const fullPaths = new Set(anki.decks.map((d) => d.fullName || d.name));
   const leafDecks = anki.decks.filter((d) => {
-    const prefix = `${d.name}::`;
-    for (const other of names) {
+    const path = d.fullName || d.name;
+    const prefix = `${path}::`;
+    for (const other of fullPaths) {
       if (other.startsWith(prefix)) return false;
     }
     return true;

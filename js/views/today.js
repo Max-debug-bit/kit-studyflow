@@ -332,9 +332,9 @@ export function renderTodayView(root, ctx) {
 
           ${anki.decks.length ? `
             <div class="entry-list" style="margin-bottom:10px;">
-              ${anki.decks.slice(0, 4).map((d) => `
+              ${anki.decks.slice(0, 8).map((d) => `
                 <div class="entry-row" style="padding:6px 10px;">
-                  <span class="small">${esc(d.name)}</span>
+                  <span class="small">${d.group ? `<span class="xs soft">${esc(d.group)} / </span>` : ''}${esc(d.name)}</span>
                   <span class="xs mono muted"><span class="anki-dot blue"></span>${d.newCards} · <span class="anki-dot red"></span>${d.learnCards || 0} · <span class="anki-dot green"></span>${d.reviewCards}</span>
                 </div>
               `).join('')}
