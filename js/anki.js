@@ -1,0 +1,151 @@
+// AnkiConnect client (http://127.0.0.1:8765) + Weighted Card-Type Time Model (Blue=New, Red=Learn, Green=Review) + Option B fallback
+
+import { store, toDateStr, toTimeStr } from './store.js';
+
+async function ankiInvoke(action, params = {}, url = null) {
+  const endpoint = (url || store.state.anki.url || 'http://127.0.0.1:8765').trim();
+  const res = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action, version: 6, params })
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const data = await res.json();
+  if (data.error) throw new Error(data.error);
+  return data.result;
+}
+
+export function getAnkiWeights() {
+  const a = store.state.anki || {};
+  return {
+    secNew: Math.max(5, Number(a.secNew) || 45),       // Blau: Neue Karten
+    secLearn: Math.max(5, Number(a.secLearn) || 30),   // Rot: Lern-/Wiederholungs-Stufe
+    secReview: Math.max(5, Number(a.secReview) || 15)  // Grün: Fällige Reviews
+  };
+}
+
+export function estimateAnkiMinutes({ newCards = 0, learnCards = 0, reviewCards = 0 }) {
+  const { secNew, secLearn, secReview } = getAnkiWeights();
+  const totalSec = (Math.max(0, newCards) * secNew) +
+                   (Math.max(0, learnCards) * secLearn) +
+                   (Math.max(0, reviewCards) * secReview);
+  return Math.ceil(totalSec / 60);
+}
+
+export async function syncAnkiConnect({ alsoLogStudyTime = false } = {}) {
+  const url = store.state.anki.url || 'http://127.0.0.1:8765';
+  const deckNames = await ankiInvoke('deckNames', {}, url);
+  const statsMap = await ankiInvoke('getDeckStats', { decks: deckNames }, url);
+
+  const decks = [];
+  for (const key of Object.keys(statsMap || {})) {
+    const d = statsMap[key];
+    if (!d || !d.name) continue;
+    const newCards = Number(d.new_count) || 0;
+    const learnCards = Number(d.learn_count) || 0;
+    const reviewCards = Number(d.review_count) || 0;
+    const due = newCards + learnCards + reviewCards;
+    if (d.name === 'Default' && due === 0) continue;
+    decks.push({ name: d.name, due, newCards, learnCards, reviewCards });
+  }
+  decks.sort((a, b) => b.due - a.due);
+
+  let todayMinutes = store.state.anki.todayMinutes || 0;
+  try {
+    const reviewedToday = await ankiInvoke('getNumCardsReviewedToday', {}, url);
+    if (typeof reviewedToday === 'number' && reviewedToday > 0) {
+      todayMinutes = Math.round((reviewedToday * (store.state.anki.secReview || 18)) / 60);
+    }
+  } catch { /* optional */ }
+
+  store.state.anki.decks = decks;
+  store.state.anki.todayMinutes = todayMinutes;
+  store.state.anki.lastSyncAt = Date.now();
+  store.state.anki.mode = 'auto';
+  store.save();
+
+  if (alsoLogStudyTime && todayMinutes >= 1) {
+    store.addEntry({ d: toDateStr(), t: toTimeStr(), m: todayMinutes, k: 'a', act: 'anki' });
+  }
+
+  const summary = getAnkiLoadSummary();
+  return {
+    ok: true,
+    deckCount: decks.length,
+    totalDue: summary.totalDue,
+    newCards: summary.totalNew,
+    learnCards: summary.totalLearn,
+    reviewCards: summary.totalReview,
+    estMinutes: summary.estMinutes,
+    todayMinutes
+  };
+}
+
+export function getAnkiLoadSummary() {
+  const anki = store.state.anki || {};
+  const weights = getAnkiWeights();
+
+  if (anki.mode === 'manual' || !Array.isArray(anki.decks) || !anki.decks.length) {
+    const totalNew = Math.max(0, Number(anki.manualNew) || 0);
+    const totalLearn = Math.max(0, Number(anki.manualLearn) || 0);
+    // Backwards compatibility if user previously only filled manualDue
+    const rawReview = anki.manualReview !== undefined ? Number(anki.manualReview) || 0 : 0;
+    const totalReview = (totalNew === 0 && totalLearn === 0 && rawReview === 0 && Number(anki.manualDue) > 0)
+      ? Math.max(0, Number(anki.manualDue))
+      : Math.max(0, rawReview);
+    const totalDue = totalNew + totalLearn + totalReview;
+    const estMinutes = estimateAnkiMinutes({ newCards: totalNew, learnCards: totalLearn, reviewCards: totalReview });
+    return {
+      source: 'manual',
+      totalNew,
+      totalLearn,
+      totalReview,
+      totalDue,
+      totalCards: totalDue,
+      estMinutes,
+      weights,
+      decks: []
+    };
+  }
+
+  // Avoid double counting parent::child decks
+  const names = new Set(anki.decks.map((d) => d.name));
+  const leafDecks = anki.decks.filter((d) => {
+    const prefix = `${d.name}::`;
+    for (const other of names) {
+      if (other.startsWith(prefix)) return false;
+    }
+    return true;
+  });
+
+  const totalNew = leafDecks.reduce((s, d) => s + (d.newCards || 0), 0);
+  const totalLearn = leafDecks.reduce((s, d) => s + (d.learnCards || 0), 0);
+  const totalReview = leafDecks.reduce((s, d) => s + (d.reviewCards || 0), 0);
+  const totalDue = totalNew + totalLearn + totalReview;
+  const estMinutes = estimateAnkiMinutes({ newCards: totalNew, learnCards: totalLearn, reviewCards: totalReview });
+
+  return {
+    source: 'ankiconnect',
+    totalNew,
+    totalLearn,
+    totalReview,
+    totalDue,
+    totalCards: totalDue,
+    estMinutes,
+    weights,
+    decks: leafDecks.filter((d) => d.due > 0).slice(0, 12),
+    allDecks: leafDecks
+  };
+}
+
+export function setManualAnki({ newCards, learnCards, reviewCards, secNew, secLearn, secReview }) {
+  store.state.anki.mode = 'manual';
+  if (newCards !== undefined) store.state.anki.manualNew = Math.max(0, Math.round(Number(newCards) || 0));
+  if (learnCards !== undefined) store.state.anki.manualLearn = Math.max(0, Math.round(Number(learnCards) || 0));
+  if (reviewCards !== undefined) store.state.anki.manualReview = Math.max(0, Math.round(Number(reviewCards) || 0));
+  store.state.anki.manualDue = (store.state.anki.manualNew || 0) + (store.state.anki.manualLearn || 0) + (store.state.anki.manualReview || 0);
+  if (secNew !== undefined) store.state.anki.secNew = Math.max(5, Math.round(Number(secNew) || 45));
+  if (secLearn !== undefined) store.state.anki.secLearn = Math.max(5, Math.round(Number(secLearn) || 30));
+  if (secReview !== undefined) store.state.anki.secReview = Math.max(5, Math.round(Number(secReview) || 15));
+  store.save();
+}

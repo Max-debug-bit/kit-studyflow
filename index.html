@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="de" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#000000" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black" />
+  <title>KIT StudyFlow</title>
+  <link rel="manifest" href="./manifest.json" />
+  <link rel="icon" type="image/svg+xml" href="./icon.svg" />
+  <link rel="apple-touch-icon" href="./icon.svg" />
+  <link rel="stylesheet" href="./css/styles.css" />
+</head>
+<body>
+  <div id="app" class="app-shell">
+    <!-- Desktop Sidebar -->
+    <aside class="sidebar" aria-label="Hauptnavigation">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 28 28" width="24" height="24">
+            <rect x="1" y="1" width="26" height="26" rx="7" fill="#111114" stroke="rgba(255,255,255,0.18)" stroke-width="1.4" />
+            <circle cx="14" cy="14" r="7" fill="none" stroke="rgba(255,255,255,0.22)" stroke-width="2.2" />
+            <path d="M14 7 A7 7 0 1 1 8.4 18.2" fill="none" stroke="#ffffff" stroke-width="2.2" stroke-linecap="round" />
+          </svg>
+        </div>
+        <div>
+          <div class="brand-title">KIT StudyFlow</div>
+          <div class="brand-sub">Maschinenbau · Plan & Fokus</div>
+        </div>
+      </div>
+
+      <nav class="sidebar-nav" id="sidebar-nav">
+        <button class="nav-item active" data-tab="today">
+          <span class="nav-icon" data-ico="list"></span>
+          <span class="nav-label">Heute</span>
+        </button>
+        <button class="nav-item" data-tab="week">
+          <span class="nav-icon" data-ico="calendar"></span>
+          <span class="nav-label">Wochenplan</span>
+        </button>
+        <button class="nav-item" data-tab="planner">
+          <span class="nav-icon" data-ico="spark"></span>
+          <span class="nav-label">KI-Planer</span>
+        </button>
+        <button class="nav-item" data-tab="stats">
+          <span class="nav-icon" data-ico="chart"></span>
+          <span class="nav-label">Statistik</span>
+        </button>
+        <button class="nav-item" data-tab="more">
+          <span class="nav-icon" data-ico="sliders"></span>
+          <span class="nav-label">Erfolge & Setup</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div id="sync-pill-desktop" class="sync-pill" title="GitHub Gist Sync-Status">
+          <span class="dot"></span>
+          <span class="sync-text">Lokal</span>
+        </div>
+        <button id="theme-toggle-desktop" class="icon-btn" title="Design wechseln (Schwarz / Hell / System)" aria-label="Design wechseln" data-ico="moon"></button>
+      </div>
+    </aside>
+
+    <!-- Main Content Column -->
+    <div class="main-column">
+      <header class="mobile-header">
+        <div class="mobile-brand">
+          <span class="mobile-logo-dot"></span>
+          <span id="mobile-page-title">Heute</span>
+        </div>
+        <div class="mobile-header-actions">
+          <button id="sync-pill-mobile" class="sync-pill compact" title="Sync-Status">
+            <span class="dot"></span>
+            <span class="sync-text">Lokal</span>
+          </button>
+          <button id="theme-toggle-mobile" class="icon-btn" title="Design wechseln" aria-label="Design wechseln" data-ico="moon"></button>
+        </div>
+      </header>
+
+      <div id="global-banners" class="global-banners"></div>
+
+      <main id="view-container" class="view-container" tabindex="-1"></main>
+    </div>
+
+    <!-- Mobile Bottom Tab Bar -->
+    <nav class="bottom-nav" id="bottom-nav" aria-label="Mobile Navigation">
+      <button class="bnav-item active" data-tab="today">
+        <span class="bnav-icon" data-ico="list"></span>
+        <span>Heute</span>
+      </button>
+      <button class="bnav-item" data-tab="week">
+        <span class="bnav-icon" data-ico="calendar"></span>
+        <span>Plan</span>
+      </button>
+      <button class="bnav-item" data-tab="planner">
+        <span class="bnav-icon" data-ico="spark"></span>
+        <span>KI</span>
+      </button>
+      <button class="bnav-item" data-tab="stats">
+        <span class="bnav-icon" data-ico="chart"></span>
+        <span>Statistik</span>
+      </button>
+      <button class="bnav-item" data-tab="more">
+        <span class="bnav-icon" data-ico="sliders"></span>
+        <span>Mehr</span>
+      </button>
+    </nav>
+  </div>
+
+  <div id="toast-root" class="toast-root" aria-live="polite"></div>
+  <div id="modal-root" class="modal-root hidden" role="dialog" aria-modal="true"></div>
+
+  <script type="module" src="./js/main.js"></script>
+</body>
+</html>

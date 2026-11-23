@@ -1,0 +1,19 @@
+{
+  "name": "KIT StudyFlow",
+  "short_name": "StudyFlow",
+  "description": "Minimalistischer Uni-Planer & Fokus-Tracker für dein KIT-Studium.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#000000",
+  "theme_color": "#000000",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "./icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
