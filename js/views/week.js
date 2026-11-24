@@ -39,8 +39,6 @@ import {
   getDayLectures,
   getDayUniSummaryLabel,
   setLectureAttendance,
-  parseTextChecklistPlan,
-  applyParsedChecklist,
   applySemesterScanResult,
   exportWeekChecklistAsText
 } from '../checklist.js';
@@ -53,6 +51,7 @@ import { syncModulesFromIcs } from '../ics.js';
 import { icon } from '../icons.js';
 
 let weekOffset = 0;
+let activeToolsMenuClose = null;
 
 export function getActiveWeekOffset() {
   return weekOffset;
@@ -96,16 +95,22 @@ export function renderWeekView(root, { toast, navigate, openModal, closeModal, p
         <h1 class="page-title">Uni-Plan · ${fmtDateShort(monday)}–${fmtDateShort(sunday)}</h1>
         <div class="small muted">Checkliste pro Tag · ${store.state.icsRaw ? `${modules.length} KIT-Fächer` : 'Kein .ics geladen'} · ${openBacklogCount} im Rückstand</div>
       </div>
-      <div class="row">
+      <div class="row" style="gap:6px;">
         <button class="btn btn-sm" id="wk-prev" title="Vorherige Woche">${icon('arrowLeft', 14)}</button>
         <button class="btn btn-sm" id="wk-now">Diese Woche</button>
         <button class="btn btn-sm" id="wk-next" title="Nächste Woche">${icon('arrowRight', 14)}</button>
-        <button class="btn btn-sm" id="wk-import-text">${icon('upload', 14)} Text-Plan</button>
-        <button class="btn btn-sm" id="wk-scan-sem">${icon('video', 14)} Semesterplan</button>
-        <button class="btn btn-sm" id="wk-copy-text">${icon('copy', 14)} Kopieren</button>
-        <button class="btn btn-sm" id="wk-audit-plan">${icon('check', 14)} Plan prüfen</button>
-        <button class="btn btn-sm" id="wk-review-plan">${icon('activity', 14)} Rückblick</button>
         <button class="btn btn-sm btn-primary" id="wk-ai-plan">${icon('spark', 14)} KI-Planer</button>
+        <div class="menu-wrap">
+          <button class="btn btn-sm" id="wk-tools-btn" aria-haspopup="true" aria-expanded="false">${icon('sliders', 13)} Tools</button>
+          <div class="menu-pop hidden" id="wk-tools-menu" role="menu">
+            <button type="button" class="menu-item" id="wk-scan-sem">${icon('video', 14)} Semesterplan scannen</button>
+            <button type="button" class="menu-item" id="wk-copy-text">${icon('copy', 14)} Checkliste kopieren</button>
+            <label class="menu-item" style="cursor:pointer;">
+              ${icon('upload', 14)} KIT-Kalender (.ics) laden
+              <input type="file" accept=".ics,text/calendar" id="wk-ics-upload-menu" class="hidden" />
+            </label>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -181,11 +186,14 @@ export function renderWeekView(root, { toast, navigate, openModal, closeModal, p
                       </div>
                     </div>
                     <div class="check-actions">
-                      ${!it.done ? `<button class="btn btn-xs btn-ghost" data-chk-shift="${esc(it.id)}" data-delta="-1" title="1 Tag vorziehen">${icon('arrowLeft', 12)}</button>` : ''}
-                      ${!it.done ? `<button class="btn btn-xs btn-ghost" data-chk-shift="${esc(it.id)}" data-delta="1" title="1 Tag nach hinten">${icon('arrowRight', 12)}</button>` : ''}
-                      ${!it.done ? `<button class="btn btn-xs btn-ghost" data-chk-timer="${esc(it.id)}" data-kind="${esc(it.kind)}" data-dur="${est || 45}" title="Timer starten">${icon('play', 12)}</button>` : ''}
-                      <button class="btn btn-xs btn-ghost" data-chk-edit="${esc(it.id)}" title="Bearbeiten / Auf anderen Tag legen">${icon('edit', 12)}</button>
-                      <button class="btn btn-xs btn-ghost" data-chk-del="${esc(it.id)}" title="Löschen">${icon('x', 13)}</button>
+                      <span class="desktop-only" style="gap:4px;align-items:center;">
+                        ${!it.done ? `<button class="btn btn-xs btn-ghost" data-chk-shift="${esc(it.id)}" data-delta="-1" title="1 Tag vorziehen">${icon('arrowLeft', 12)}</button>` : ''}
+                        ${!it.done ? `<button class="btn btn-xs btn-ghost" data-chk-shift="${esc(it.id)}" data-delta="1" title="1 Tag nach hinten">${icon('arrowRight', 12)}</button>` : ''}
+                        ${!it.done ? `<button class="btn btn-xs btn-ghost" data-chk-timer="${esc(it.id)}" data-kind="${esc(it.kind)}" data-dur="${est || 45}" title="Timer starten">${icon('play', 12)}</button>` : ''}
+                        <button class="btn btn-xs btn-ghost" data-chk-edit="${esc(it.id)}" title="Bearbeiten / Auf anderen Tag legen">${icon('edit', 12)}</button>
+                        <button class="btn btn-xs btn-ghost" data-chk-del="${esc(it.id)}" title="Löschen">${icon('x', 13)}</button>
+                      </span>
+                      <button type="button" class="btn btn-xs btn-ghost mobile-only" data-chk-menu="${esc(it.id)}" aria-label="Aktionen">•••</button>
                     </div>
                   </div>
                 `;
@@ -298,7 +306,7 @@ export function renderWeekView(root, { toast, navigate, openModal, closeModal, p
                   <div style="font-weight:600;font-size:0.88rem;">${esc(c.title)}</div>
                   <div class="xs muted mono">
                     ${c.recurrence === 'weekly' ? `Jeden ${WEEKDAYS_DE[c.weekday]}` : fmtDateShort(c.date)} · ${c.start}–${c.end}
-                    · ${c.eventType === 'lecture' ? 'VL' : c.eventType === 'workshop' ? 'Workshop' : 'Übung/Tut'}
+                    · ${c.eventType === 'lecture' ? 'VL' : c.eventType === 'workshop' ? 'Workshop' : 'Übung/Tut'}${c.liveReviewMinutes > 0 ? ` · Nacharb. ~${c.liveReviewMinutes}m` : ''}
                   </div>
                 </div>
                 <button class="btn btn-xs btn-ghost" data-del-custom="${esc(c.id)}">${icon('x', 13)}</button>
@@ -383,17 +391,37 @@ export function renderWeekView(root, { toast, navigate, openModal, closeModal, p
     </div>
   `;
 
-  // Navigation
+  // Navigation & Tools Menu
   const viewCtx = { toast, navigate, openModal, closeModal, promptLogFromChecklist };
   root.querySelector('#wk-prev')?.addEventListener('click', () => { weekOffset--; renderWeekView(root, viewCtx); });
   root.querySelector('#wk-now')?.addEventListener('click', () => { weekOffset = 0; renderWeekView(root, viewCtx); });
   root.querySelector('#wk-next')?.addEventListener('click', () => { weekOffset++; renderWeekView(root, viewCtx); });
   root.querySelector('#wk-ai-plan')?.addEventListener('click', () => navigate('planner'));
-  root.querySelector('#wk-audit-plan')?.addEventListener('click', () => navigate('planner', { autoAudit: true }));
-  root.querySelector('#wk-review-plan')?.addEventListener('click', () => navigate('planner', { autoReview: true }));
+
+  if (activeToolsMenuClose) {
+    document.removeEventListener('click', activeToolsMenuClose);
+    activeToolsMenuClose = null;
+  }
+  const toolsBtn = root.querySelector('#wk-tools-btn');
+  const toolsMenu = root.querySelector('#wk-tools-menu');
+  const closeToolsMenu = () => {
+    toolsMenu?.classList.add('hidden');
+    toolsBtn?.setAttribute('aria-expanded', 'false');
+  };
+  toolsBtn?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const isHidden = toolsMenu.classList.toggle('hidden');
+    toolsBtn.setAttribute('aria-expanded', String(!isHidden));
+  });
+  activeToolsMenuClose = (e) => {
+    if (!toolsMenu || toolsMenu.classList.contains('hidden')) return;
+    if (!toolsMenu.contains(e.target) && e.target !== toolsBtn) closeToolsMenu();
+  };
+  document.addEventListener('click', activeToolsMenuClose);
 
   // Semesterplan-Scanner Modal (BOTH Gemini-Pro-Bridge AND Direct API!)
   root.querySelector('#wk-scan-sem')?.addEventListener('click', () => {
+    closeToolsMenu();
     let lastScan = null;
     let scanMode = 'bridge'; // Default to reliable Gemini-Pro-Bridge, 1-click toggle to API
 
@@ -580,39 +608,9 @@ export function renderWeekView(root, { toast, navigate, openModal, closeModal, p
   });
 
   root.querySelector('#wk-copy-text')?.addEventListener('click', async () => {
+    closeToolsMenu();
     try { await navigator.clipboard.writeText(exportWeekChecklistAsText(monday)); toast('Checkliste kopiert.', 'ok'); }
     catch { toast('Kopieren fehlgeschlagen.', 'err'); }
-  });
-
-  // Import Text-Plan
-  root.querySelector('#wk-import-text')?.addEventListener('click', () => {
-    openModal(`
-      <div class="card-header">
-        <h3 class="card-title">Text-Plan importieren</h3>
-        <button class="icon-btn" id="m-close">${icon('x', 15)}</button>
-      </div>
-      <p class="xs muted" style="margin-top:0;">
-        Füge einen Checklisten-Plan ein (Format <code>── MO, 23.11. | Uni 09:45–15:30 ──</code> und <code>── VORMERKEN ──</code>).
-      </p>
-      <textarea id="imp-plan-txt" class="input mono" style="min-height:210px;" placeholder="── MO, 23.11. | Uni 09:45–15:30 ──&#10;Anki-Reviews (30 Min.)&#10;HM: 1 offenes VL-Video schauen"></textarea>
-      <div class="row-between" style="margin-top:12px;">
-        <label class="row xs muted" style="cursor:pointer;">
-          <input type="checkbox" id="imp-plan-replace" />
-          Offene Punkte an diesen Tagen ersetzen
-        </label>
-        <button class="btn btn-primary btn-sm" id="imp-plan-go">Importieren</button>
-      </div>
-    `, (modalEl) => {
-      modalEl.querySelector('#m-close')?.addEventListener('click', closeModal);
-      modalEl.querySelector('#imp-plan-go')?.addEventListener('click', () => {
-        const parsed = parseTextChecklistPlan(modalEl.querySelector('#imp-plan-txt').value);
-        if (!parsed.items.length && !parsed.reminders.length) { toast('Keine Punkte erkannt.', 'err'); return; }
-        const replaceDates = modalEl.querySelector('#imp-plan-replace').checked ? Array.from(new Set(parsed.items.map((x) => x.d))) : [];
-        const res = applyParsedChecklist({ ...parsed, replaceDates });
-        closeModal();
-        toast(`Importiert: ${res.addedItems} Punkte & ${res.addedReminders} Vormerkungen.`, 'ok', { undo: true });
-      });
-    });
   });
 
   // ICS Upload
@@ -620,12 +618,14 @@ export function renderWeekView(root, { toast, navigate, openModal, closeModal, p
     input?.addEventListener('change', async () => {
       const f = input.files?.[0];
       if (!f) return;
+      closeToolsMenu();
       const res = syncModulesFromIcs(store, await f.text());
       toast(`KIT-Kalender geladen: ${res.totalEvents} Serientermine, ${res.modulesAdded} neue Fächer.`, 'ok');
     });
   };
   handleIcs(root.querySelector('#wk-ics-upload'));
   handleIcs(root.querySelector('#wk-ics-upload-2'));
+  handleIcs(root.querySelector('#wk-ics-upload-menu'));
 
   // Checklist actions + 1-Click Day Shift + Drag & Drop + Log-Modal + Undo Toast
   root.querySelectorAll('[data-chk-toggle]').forEach((el) => {
@@ -768,13 +768,19 @@ export function renderWeekView(root, { toast, navigate, openModal, closeModal, p
         <div class="field-grid">
           <div class="field"><label>Start</label><input type="time" class="input mono" id="mc-st" value="09:45" required /></div>
           <div class="field"><label>Ende</label><input type="time" class="input mono" id="mc-en" value="11:15" required /></div>
+        </div>
+        <div class="field-grid">
           <div class="field">
             <label>Typ</label>
             <select class="input" id="mc-type">
-              <option value="exercise">Übung / Tutorium (keine Nacharbeit)</option>
-              <option value="workshop">Workshop (keine Nacharbeit)</option>
-              <option value="lecture">Vorlesung (mit Nacharbeit)</option>
+              <option value="exercise">Übung / Tutorium</option>
+              <option value="workshop">Workshop</option>
+              <option value="lecture">Vorlesung</option>
             </select>
+          </div>
+          <div class="field">
+            <label>Nacharbeit (min, optional)</label>
+            <input type="number" class="input mono" id="mc-rev-min" min="0" max="360" value="0" />
           </div>
         </div>
         <div class="row" style="justify-content:flex-end;"><button type="submit" class="btn btn-primary btn-sm">Speichern</button></div>
@@ -782,10 +788,17 @@ export function renderWeekView(root, { toast, navigate, openModal, closeModal, p
     `, (modalEl) => {
       modalEl.querySelector('#m-close')?.addEventListener('click', closeModal);
       const recSel = modalEl.querySelector('#mc-rec');
+      const typeSel = modalEl.querySelector('#mc-type');
+      const revInp = modalEl.querySelector('#mc-rev-min');
       recSel?.addEventListener('change', () => {
         const isOnce = recSel.value === 'once';
         modalEl.querySelector('#mc-wd-wrap').classList.toggle('hidden', isOnce);
         modalEl.querySelector('#mc-dt-wrap').classList.toggle('hidden', !isOnce);
+      });
+      typeSel?.addEventListener('change', () => {
+        const curVal = Number(revInp.value) || 0;
+        if (typeSel.value === 'lecture' && curVal === 0) revInp.value = '75';
+        else if (typeSel.value !== 'lecture' && curVal === 75) revInp.value = '0';
       });
       modalEl.querySelector('#m-cev-form')?.addEventListener('submit', (e) => {
         e.preventDefault();
@@ -796,8 +809,8 @@ export function renderWeekView(root, { toast, navigate, openModal, closeModal, p
           date: modalEl.querySelector('#mc-dt').value,
           start: modalEl.querySelector('#mc-st').value,
           end: modalEl.querySelector('#mc-en').value,
-          eventType: modalEl.querySelector('#mc-type').value,
-          liveReviewMinutes: modalEl.querySelector('#mc-type').value === 'lecture' ? 75 : 0
+          eventType: typeSel.value,
+          liveReviewMinutes: Math.max(0, Number(revInp.value) || 0)
         });
         closeModal();
         toast('Termin hinzugefügt.', 'ok');
@@ -831,7 +844,7 @@ export function renderWeekView(root, { toast, navigate, openModal, closeModal, p
             <select class="input" id="ov-type">
               <option value="default" ${curOv === 'default' ? 'selected' : ''}>Standard aus Modul-Regel</option>
               <option value="lecture" ${curOv === 'lecture' ? 'selected' : ''}>Vorlesung (Nacharbeit einplanen)</option>
-              <option value="exercise" ${curOv === 'exercise' ? 'selected' : ''}>Übung (keine Nacharbeit nötig)</option>
+              <option value="exercise" ${curOv === 'exercise' ? 'selected' : ''}>Übung (Nacharbeit lt. Modul-Regel)</option>
               <option value="cancelled" ${curOv === 'cancelled' ? 'selected' : ''}>Fällt aus (nicht blockiert, 0 min)</option>
             </select>
           </div>
@@ -966,6 +979,86 @@ export function renderWeekView(root, { toast, navigate, openModal, closeModal, p
     btn.addEventListener('click', () => {
       const it = store.state.checklist.find((x) => x.id === btn.getAttribute('data-chk-edit'));
       if (it) openCheckItemModal(it);
+    });
+  });
+  root.querySelectorAll('[data-chk-menu]').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const it = store.state.checklist.find((x) => x.id === btn.getAttribute('data-chk-menu'));
+      if (!it) return;
+      const est = estimateChecklistItemMinutes(it, calibratedCatalog);
+      const wd = WEEKDAYS_DE[parseDateStr(it.d).getDay()];
+      openModal(`
+        <div class="card-header">
+          <h3 class="card-title">Punkt-Aktionen</h3>
+          <button class="icon-btn" id="m-close">${icon('x', 15)}</button>
+        </div>
+        <div class="small" style="font-weight:600;margin-bottom:2px;">${esc(it.title)}</div>
+        <div class="xs muted mono" style="margin-bottom:12px;">${wd}, ${fmtDateShort(it.d)}${est > 0 ? ` · ~${fmtMin(est)}` : ''}</div>
+        <div class="stack" style="gap:6px;">
+          ${!it.done ? `
+            <button type="button" class="menu-item" id="cm-done">${icon('check', 15)} Abhaken &amp; Zeit loggen</button>
+            <button type="button" class="menu-item" id="cm-timer">${icon('play', 15)} Mit Timer starten (~${est || 45}m)</button>
+            <button type="button" class="menu-item" id="cm-prev">${icon('arrowLeft', 15)} 1 Tag vorziehen</button>
+            <button type="button" class="menu-item" id="cm-next">${icon('arrowRight', 15)} 1 Tag nach hinten</button>
+          ` : `
+            <button type="button" class="menu-item" id="cm-done">${icon('check', 15)} Wieder als offen markieren</button>
+          `}
+          <button type="button" class="menu-item" id="cm-edit">${icon('edit', 15)} Bearbeiten / Tag wählen</button>
+          ${!it.done ? `<button type="button" class="menu-item" id="cm-backlog">${icon('list', 15)} In Rückstand schieben</button>` : ''}
+          <div style="border-top:1px solid var(--border);margin-top:4px;padding-top:6px;">
+            <button type="button" class="menu-item danger" id="cm-del">${icon('trash', 15)} Punkt löschen</button>
+          </div>
+        </div>
+      `, (modalEl) => {
+        modalEl.querySelector('#m-close')?.addEventListener('click', closeModal);
+        modalEl.querySelector('#cm-done')?.addEventListener('click', () => {
+          closeModal();
+          const updated = toggleChecklistItem(it.id);
+          if (updated && updated.done && promptLogFromChecklist) promptLogFromChecklist(updated);
+        });
+        modalEl.querySelector('#cm-timer')?.addEventListener('click', () => {
+          closeModal();
+          const meta = inferMetaFromChecklistItem(it);
+          const catId = it.catalogId || (meta.kind !== 'a' ? (store.matchCatalogItemForText(it.title || '', meta.act, meta.mod)?.id || '') : '');
+          store.startTimer({
+            mode: 'countdown',
+            kind: it.kind || meta.kind || 'l',
+            durationMin: est || 45,
+            planBlockId: it.id,
+            mod: meta.mod || '',
+            note: it.title || '',
+            act: meta.act || '',
+            catalogId: catId
+          });
+          toast('Timer gestartet.', 'ok');
+          navigate('today');
+        });
+        modalEl.querySelector('#cm-prev')?.addEventListener('click', () => {
+          closeModal();
+          const res = shiftChecklistItemByDays(it.id, -1);
+          if (res.ok) toast(`Verschoben auf ${WEEKDAYS_DE[parseDateStr(res.targetDate).getDay()]}, ${fmtDateShort(res.targetDate)}.`, 'ok');
+        });
+        modalEl.querySelector('#cm-next')?.addEventListener('click', () => {
+          closeModal();
+          const res = shiftChecklistItemByDays(it.id, 1);
+          if (res.ok) toast(`Verschoben auf ${WEEKDAYS_DE[parseDateStr(res.targetDate).getDay()]}, ${fmtDateShort(res.targetDate)}.`, 'ok');
+        });
+        modalEl.querySelector('#cm-edit')?.addEventListener('click', () => {
+          closeModal();
+          openCheckItemModal(it);
+        });
+        modalEl.querySelector('#cm-backlog')?.addEventListener('click', () => {
+          closeModal();
+          moveChecklistItemToBacklog(it.id);
+          toast('In den offenen Rückstand verschoben.', 'ok', { undo: true });
+        });
+        modalEl.querySelector('#cm-del')?.addEventListener('click', () => {
+          closeModal();
+          deleteChecklistItem(it.id);
+          toast('Punkt gelöscht.', '', { undo: true });
+        });
+      });
     });
   });
 

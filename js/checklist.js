@@ -289,8 +289,11 @@ export function getWeekAheadImpact(todayStr = toDateStr()) {
   const monday = getMondayOfWeek(todayStr);
   const sunday = addDays(monday, 6);
   const tomorrow = addDays(todayStr, 1);
+  const rollingEnd = addDays(todayStr, 5);
+  const horizonEnd = rollingEnd > sunday ? rollingEnd : sunday;
+  const horizonLabel = horizonEnd > sunday ? 'NÄCHSTE 5 TAGE' : 'WOCHEN-WIRKUNG';
   const cal = store.getCalibratedTaskCatalog();
-  const weekItems = (store.state.checklist || []).filter((c) => c.d >= monday && c.d <= sunday);
+  const windowItems = (store.state.checklist || []).filter((c) => c.d >= monday && c.d <= horizonEnd);
 
   let todayOpenMin = 0;
   let todayDoneMin = 0;
@@ -300,17 +303,17 @@ export function getWeekAheadImpact(todayStr = toDateStr()) {
   let boughtForwardCount = 0;
 
   const dayLoads = {};
-  for (let d = tomorrow; d <= sunday; d = addDays(d, 1)) {
+  for (let d = tomorrow; d <= horizonEnd; d = addDays(d, 1)) {
     const wd = WEEKDAYS_DE[parseDateStr(d).getDay()];
     dayLoads[d] = { d, wd, shortDate: fmtDateShort(d), totalOpenMin: 0, count: 0 };
   }
 
-  for (const it of weekItems) {
+  for (const it of windowItems) {
     const mins = estimateChecklistItemMinutes(it, cal);
     if (it.d === todayStr) {
       if (it.done) todayDoneMin += mins;
       else todayOpenMin += mins;
-    } else if (it.d > todayStr && !it.done) {
+    } else if (it.d > todayStr && it.d <= horizonEnd && !it.done) {
       restWeekOpenMin += mins;
       restWeekOpenCount++;
       if (dayLoads[it.d]) {
@@ -327,8 +330,16 @@ export function getWeekAheadImpact(todayStr = toDateStr()) {
   }
 
   // Pick top 3 upcoming open tasks (nearest days first, prioritizing impactful ones)
-  const upcomingOpen = weekItems
-    .filter((it) => it.d > todayStr && !it.done)
+  const uniEventsCache = {};
+  const hasUniOnDay = (dStr) => {
+    if (uniEventsCache[dStr] === undefined) {
+      uniEventsCache[dStr] = getDayLectures(dStr).some((l) => !l.cancelled && l.mode === 'live' && l.override !== 'skipped');
+    }
+    return uniEventsCache[dStr];
+  };
+
+  const upcomingOpen = windowItems
+    .filter((it) => it.d > todayStr && it.d <= horizonEnd && !it.done)
     .sort((a, b) => a.d.localeCompare(b.d) || estimateChecklistItemMinutes(b, cal) - estimateChecklistItemMinutes(a, cal))
     .slice(0, 3)
     .map((it) => {
@@ -338,7 +349,9 @@ export function getWeekAheadImpact(todayStr = toDateStr()) {
       const dayAfterMin = Math.max(0, dayBeforeMin - estMin);
       const freesWholeDay = dayAfterMin === 0;
       const impactText = freesWholeDay
-        ? `${load.wd} (${load.shortDate}) wird dadurch komplett frei!`
+        ? (hasUniOnDay(it.d)
+            ? `Lern-Todos am ${load.wd} (${load.shortDate}) werden komplett frei!`
+            : `${load.wd} (${load.shortDate}) wird dadurch komplett frei!`)
         : `${load.wd} (${load.shortDate}): ${fmtMin(dayBeforeMin)} → ${fmtMin(dayAfterMin)} (-${fmtMin(estMin)})`;
       return {
         id: it.id,
@@ -357,6 +370,8 @@ export function getWeekAheadImpact(todayStr = toDateStr()) {
   return {
     monday,
     sunday,
+    horizonEnd,
+    horizonLabel,
     todayOpenMin,
     todayDoneMin,
     restWeekOpenMin,
@@ -646,11 +661,27 @@ export function getDayLectures(dStr, nowDate = new Date()) {
     let videoStudyMinutes = 0;
     let createsAnki = false;
     if (!cancelled) {
-      if (typeOverride === 'exercise' || effectiveType === 'workshop') {
-        // Explicit per-date override (e.g. MKL VL -> Übung) or Workshop: 0 unless custom event defines review
+      if (effectiveType === 'workshop') {
         liveReviewMinutes = ev.isCustom ? (ev.customLiveReviewMin || 0) : 0;
         videoStudyMinutes = 0;
         createsAnki = false;
+      } else if (typeOverride === 'exercise') {
+        // Respect custom review, own exercise rule, or matching sibling (Ü) rule for the same module
+        if (ev.isCustom) {
+          liveReviewMinutes = ev.customLiveReviewMin || 0;
+        } else if (rule && (rule.type === 'Ü' || rule.type === 'T')) {
+          liveReviewMinutes = rule.liveReviewMinutes ?? 0;
+          videoStudyMinutes = rule.videoStudyMinutes ?? 0;
+          createsAnki = Boolean(rule.createsAnki);
+        } else if (rule) {
+          const base = (rule.shortName || '').replace(/\s*\([^)]+\)/, '').trim().toLowerCase();
+          const sibling = Object.values(store.state.modules || {}).find(
+            (m) => (m.type === 'Ü' || m.type === 'T') && (m.shortName || '').replace(/\s*\([^)]+\)/, '').trim().toLowerCase() === base
+          );
+          liveReviewMinutes = sibling?.liveReviewMinutes ?? 0;
+          videoStudyMinutes = sibling?.videoStudyMinutes ?? 0;
+          createsAnki = Boolean(sibling?.createsAnki);
+        }
       } else if (effectiveType === 'exercise') {
         // Regular exercise module (e.g. HM I (Ü)): ALWAYS respect user-configured rule values!
         liveReviewMinutes = ev.isCustom ? (ev.customLiveReviewMin || 0) : (rule?.liveReviewMinutes ?? 0);

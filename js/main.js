@@ -3,7 +3,7 @@
 
 import { store, toDateStr, toTimeStr, fmtDateShort, parseDateStr, WEEKDAYS_DE, escapeHtml } from './store.js';
 import { scheduleAutoSync, flushPendingSync, syncNow, pullFromGist, isGistConfigured, onSyncStatusChange } from './sync.js';
-import { syncDayLecturesToProductive, syncRecentLecturesToProductive, reconcileBacklogStatus, inferMetaFromChecklistItem } from './checklist.js';
+import { syncDayLecturesToProductive, syncRecentLecturesToProductive, reconcileBacklogStatus, inferMetaFromChecklistItem, estimateChecklistItemMinutes } from './checklist.js';
 import { decodePairingCode, isPinProtectedPairingCode } from './qr.js';
 import { icon } from './icons.js';
 import { renderTodayView, cleanupTodayView } from './views/today.js';
@@ -89,26 +89,42 @@ function closeModal() {
 // ---------- Checklist -> Lernzeit-Brücke (#1, without Timer!) ----------
 
 function promptLogFromChecklist(item) {
-  document.getElementById('quick-log-bar')?.remove();
   if (!item || !item.done) return;
 
   const meta = inferMetaFromChecklistItem(item);
   const today = toDateStr();
   const isPastItem = Boolean(item.d && item.d < today);
   const kindLabels = { l: 'Lernzeit', a: 'Anki-Lernzeit', p: 'Vorlesung / Produktiv' };
+  const actLabels = { '': 'Allgemein', video: 'Video', review: 'Nacharbeit', homework: 'HA', exam: 'Klausur/Üben', anki: 'Anki', prod: 'Vorlesung' };
 
-  // Default to asking real task duration ('add'), with 1-click switch to Focus-Friend daily total ('total').
-  // Input ALWAYS starts EMPTY — never blindly assumes the estimated duration!
+  // Default to real task duration ('add'), with 1-click switch to Focus-Friend daily total ('total').
+  // Input starts EMPTY — 1-Tap chips save immediately without blindly pre-filling the input!
   let logMode = 'add';
   let activeKind = meta.kind;
   const moduleOpts = Object.values(store.state.modules || {})
     .map((m) => `<option value="${escapeHtml(m.id)}" ${m.id === meta.mod ? 'selected' : ''}>${escapeHtml(m.shortName)}</option>`)
     .join('');
   const calibratedCatalog = store.getCalibratedTaskCatalog();
-  const autoCatId = item.catalogId || (activeKind !== 'a' ? (store.matchCatalogItemForText(item.title, meta.act, meta.mod)?.id || '') : '');
+  const autoCatObj = item.catalogId
+    ? calibratedCatalog.find((c) => c.id === item.catalogId)
+    : (activeKind !== 'a' ? store.matchCatalogItemForText(item.title, meta.act, meta.mod) : null);
+  const autoCatId = autoCatObj?.id || '';
   const catalogOpts = calibratedCatalog
     .map((c) => `<option value="${escapeHtml(c.id)}" ${c.id === autoCatId ? 'selected' : ''}>${escapeHtml(c.subject)} · ${escapeHtml(c.title)} (${c.effectiveMin}m)</option>`)
     .join('');
+
+  const estMin = item.isAnkiDaily
+    ? (store.state.anki.minDailyAnkiMin || 30)
+    : estimateChecklistItemMinutes(item, calibratedCatalog);
+  const basePresets = item.isAnkiDaily ? [15, 20, 30, 45] : [30, 45, 60, 90];
+  const showEstChip = !item.isAnkiDaily && estMin > 0;
+
+  const autoModName = meta.mod && store.state.modules[meta.mod] ? store.state.modules[meta.mod].shortName : 'Allgemein';
+  const autoSummaryParts = [kindLabels[activeKind]];
+  if (autoModName !== 'Allgemein') autoSummaryParts.push(autoModName);
+  if (meta.act && actLabels[meta.act]) autoSummaryParts.push(actLabels[meta.act]);
+  if (autoCatObj) autoSummaryParts.push(autoCatObj.title);
+  const detailsSummaryText = autoSummaryParts.join(' · ');
 
   openModal(`
     <div class="card-header">
@@ -116,24 +132,23 @@ function promptLogFromChecklist(item) {
       <button class="icon-btn" id="qlm-close" type="button">${icon('x', 15)}</button>
     </div>
     <div class="small" style="font-weight:620;margin-bottom:4px;">${escapeHtml(item.title)}</div>
-    <div class="xs muted" style="margin-bottom:12px;">
+    <div class="xs muted" style="margin-bottom:10px;">
       ${item.isAnkiDaily
-        ? `Du musst nicht alle Karten schaffen — trage ein, wie viele Minuten Anki du heute gemacht hast${item.remainingCards > 0 ? ` (${item.remainingCards} Karten bleiben einfach für später/morgen)` : ''}.`
-        : item.estMin > 0
-          ? `Plan-Schätzung war ~${item.estMin} min — trage deine echte Dauer ein (wird nicht blind übernommen).`
-          : 'Trage ein, wie viele Minuten du wirklich dafür gebraucht hast.'}
+        ? `Tippe direkt eine Zeit an oder gib Minuten ein${item.remainingCards > 0 ? ` (${item.remainingCards} Karten bleiben für später)` : ''}.`
+        : '1 Tipp auf eine Dauer speichert sofort — oder eigene Minuten / Focus-Friend Stand eintragen.'}
     </div>
     <form id="qlm-form" class="stack">
+      <div id="qlm-chips-wrap" class="quick-dur-chips">
+        ${basePresets.map((m) => `<button type="button" class="quick-dur-chip" data-quick-min="${m}">${m} m</button>`).join('')}
+        ${showEstChip ? `<button type="button" class="quick-dur-chip est" data-quick-min="${estMin}" title="Plan- / Katalog-Schätzung direkt speichern">~${estMin} m</button>` : ''}
+      </div>
+
       <div class="row-between" style="gap:8px;">
         <div class="segmented" title="Dauer = Minuten dieser Aufgabe · Focus-Friend Stand = Gesamtwert aus Focus Friend">
           <button type="button" data-qlm="add" class="active">Dauer (min)</button>
           <button type="button" data-qlm="total">Focus-Friend Stand</button>
         </div>
-        <select id="qlm-kind" class="input" style="width:auto;padding:5px 8px;font-size:0.8rem;">
-          <option value="l" ${activeKind === 'l' ? 'selected' : ''}>Lernzeit</option>
-          <option value="a" ${activeKind === 'a' ? 'selected' : ''}>Anki-Lernzeit</option>
-          <option value="p" ${activeKind === 'p' ? 'selected' : ''}>Vorlesung / Produktiv</option>
-        </select>
+        <span class="xs mono muted" id="qlm-preview"></span>
       </div>
 
       ${isPastItem ? `
@@ -146,61 +161,89 @@ function promptLogFromChecklist(item) {
         </div>
       ` : ''}
 
-      <div class="field">
-        <label id="qlm-min-label">Echte Dauer dieser Aufgabe (Minuten)</label>
-        <input type="number" id="qlm-min" class="input mono" min="1" max="1440" placeholder="Minuten eingeben, z. B. 45" autofocus required />
-        <div class="xs mono muted" id="qlm-preview" style="margin-top:2px;"></div>
+      <div class="row" style="gap:8px;">
+        <input type="number" id="qlm-min" class="input mono" style="flex:1;" min="1" max="1440" placeholder="Eigene Minuten (z. B. 45)" />
+        <button type="submit" class="btn btn-primary btn-sm" id="qlm-save">${icon('check', 13)} Speichern</button>
       </div>
 
-      <div class="field-grid">
-        <div class="field">
-          <label>Fach (optional)</label>
-          <select id="qlm-mod" class="input">
-            <option value="">Allgemein</option>
-            ${moduleOpts}
-          </select>
+      <details style="padding:8px 10px;border-radius:var(--radius-xs);background:var(--bg-soft);border:1px solid var(--border);">
+        <summary class="xs muted" style="cursor:pointer;" id="qlm-details-summary">Details anpassen (${escapeHtml(detailsSummaryText)})</summary>
+        <div class="stack" style="margin-top:10px;">
+          <div class="field">
+            <label>Art</label>
+            <select id="qlm-kind" class="input">
+              <option value="l" ${activeKind === 'l' ? 'selected' : ''}>Lernzeit</option>
+              <option value="a" ${activeKind === 'a' ? 'selected' : ''}>Anki-Lernzeit</option>
+              <option value="p" ${activeKind === 'p' ? 'selected' : ''}>Vorlesung / Produktiv</option>
+            </select>
+          </div>
+          <div class="field-grid">
+            <div class="field">
+              <label>Fach (optional)</label>
+              <select id="qlm-mod" class="input">
+                <option value="">Allgemein</option>
+                ${moduleOpts}
+              </select>
+            </div>
+            <div class="field">
+              <label>Tätigkeit (für KI)</label>
+              <select id="qlm-act" class="input">
+                <option value="" ${!meta.act ? 'selected' : ''}>Allgemein</option>
+                <option value="video" ${meta.act === 'video' ? 'selected' : ''}>VL-Video durcharbeiten</option>
+                <option value="review" ${meta.act === 'review' ? 'selected' : ''}>VL nacharbeiten & Ankis</option>
+                <option value="homework" ${meta.act === 'homework' ? 'selected' : ''}>Hausaufgabe (Verständnis)</option>
+                <option value="exam" ${meta.act === 'exam' ? 'selected' : ''}>Altklausur / Üben</option>
+                <option value="anki" hidden>Anki-Reviews (fest)</option>
+                <option value="prod" hidden>Vorlesung / Produktiv (fest)</option>
+              </select>
+            </div>
+          </div>
+          ${!item.isAnkiDaily ? `
+            <div class="field">
+              <label>Katalog-Baustein (kalibriert ab 2x automatisch)</label>
+              <select id="qlm-cat" class="input">
+                <option value="">Automatisch / keiner</option>
+                ${catalogOpts}
+              </select>
+            </div>
+          ` : ''}
         </div>
-        <div class="field">
-          <label>Tätigkeit (für KI)</label>
-          <select id="qlm-act" class="input">
-            <option value="" ${!meta.act ? 'selected' : ''}>Allgemein</option>
-            <option value="video" ${meta.act === 'video' ? 'selected' : ''}>VL-Video durcharbeiten</option>
-            <option value="review" ${meta.act === 'review' ? 'selected' : ''}>VL nacharbeiten & Ankis</option>
-            <option value="homework" ${meta.act === 'homework' ? 'selected' : ''}>Hausaufgabe (Verständnis)</option>
-            <option value="exam" ${meta.act === 'exam' ? 'selected' : ''}>Altklausur / Üben</option>
-            <option value="anki" hidden>Anki-Reviews (fest)</option>
-            <option value="prod" hidden>Vorlesung / Produktiv (fest)</option>
-          </select>
-        </div>
-      </div>
+      </details>
 
-      ${!item.isAnkiDaily ? `
-        <div class="field">
-          <label>Katalog-Baustein (kalibriert ab 2x automatisch)</label>
-          <select id="qlm-cat" class="input">
-            <option value="">Automatisch / keiner</option>
-            ${catalogOpts}
-          </select>
-        </div>
-      ` : ''}
-
-      <div class="row-between" style="margin-top:4px;">
-        <button type="button" class="btn btn-sm" id="qlm-skip">${item.isAnkiDaily && item.alreadyLoggedMin > 0 ? `Ohne neue Zeit (${item.alreadyLoggedMin} min behalten)` : 'Ohne Zeit abhaken'}</button>
-        <button type="submit" class="btn btn-primary btn-sm" id="qlm-save">${icon('check', 13)} Zeit speichern</button>
+      <div class="row" style="justify-content:flex-start;">
+        <button type="button" class="btn btn-sm btn-ghost" id="qlm-skip">${item.isAnkiDaily && item.alreadyLoggedMin > 0 ? `Ohne neue Zeit (${item.alreadyLoggedMin} min behalten)` : 'Ohne Zeit abhaken'}</button>
       </div>
     </form>
   `, (modalEl) => {
     const inp = modalEl.querySelector('#qlm-min');
-    const lbl = modalEl.querySelector('#qlm-min-label');
     const prevEl = modalEl.querySelector('#qlm-preview');
+    const chipsWrap = modalEl.querySelector('#qlm-chips-wrap');
     const kindSel = modalEl.querySelector('#qlm-kind');
+    const modSel = modalEl.querySelector('#qlm-mod');
     const actSel = modalEl.querySelector('#qlm-act');
+    const catSel = modalEl.querySelector('#qlm-cat');
+    const summaryEl = modalEl.querySelector('#qlm-details-summary');
     const dateEl = modalEl.querySelector('#qlm-date');
     let lastLearnAct = meta.act && meta.act !== 'anki' ? meta.act : '';
 
     const getTargetDate = () => {
       const v = dateEl?.value || today;
       return v > today ? today : v;
+    };
+
+    const refreshDetailsSummary = () => {
+      if (!summaryEl) return;
+      const parts = [kindLabels[activeKind]];
+      const mId = modSel?.value || '';
+      if (mId && store.state.modules[mId]) parts.push(store.state.modules[mId].shortName);
+      const aVal = activeKind === 'a' ? 'anki' : activeKind === 'p' ? 'prod' : (actSel?.value || '');
+      if (aVal && actLabels[aVal]) parts.push(actLabels[aVal]);
+      const cVal = catSel?.value || '';
+      if (cVal) {
+        const hit = calibratedCatalog.find((c) => c.id === cVal);
+        if (hit) parts.push(hit.title);
+      }
+      summaryEl.textContent = `Details anpassen (${parts.join(' · ')})`;
     };
 
     const syncActLock = () => {
@@ -220,45 +263,102 @@ function promptLogFromChecklist(item) {
         actSel.style.opacity = '';
         if (actSel.value === 'anki' || actSel.value === 'prod') actSel.value = lastLearnAct || '';
       }
+      refreshDetailsSummary();
     };
 
     const refreshPreview = () => {
-      // Always read fresh breakdown so background sync / timer expiry never cause stale deltas!
       const freshBefore = store.getDayBreakdown(getTargetDate());
       const curMin = freshBefore[activeKind] || 0;
       const val = Math.round(Number(inp.value) || 0);
+      if (chipsWrap) chipsWrap.classList.toggle('hidden', logMode !== 'add');
       if (logMode === 'add') {
-        lbl.textContent = 'Echte Dauer dieser Aufgabe (Minuten)';
-        inp.placeholder = 'Minuten eingeben, z. B. 45';
+        inp.placeholder = 'Eigene Minuten (z. B. 45)';
         if (val > 0) {
-          prevEl.textContent = `Neuer Tagesstand ${kindLabels[activeKind]}: ${curMin + val} min (+${val} min)`;
+          prevEl.textContent = `Neu: ${curMin + val} min (+${val} min)`;
           prevEl.style.color = 'var(--kit)';
         } else {
-          prevEl.textContent = `Aktueller Tagesstand ${kindLabels[activeKind]}: ${curMin} min`;
+          prevEl.textContent = `Stand: ${curMin} min`;
           prevEl.style.color = 'var(--text-soft)';
         }
       } else {
-        lbl.textContent = `Focus-Friend Gesamtstand (${fmtDateShort(getTargetDate())} · ${kindLabels[activeKind]})`;
-        inp.placeholder = `Aktuell ${curMin} min — neuen Gesamtstand abtippen`;
+        inp.placeholder = `Focus-Friend Gesamtstand (aktuell ${curMin} min)`;
         if (val > 0) {
           const diff = val - curMin;
           prevEl.textContent = diff > 0
-            ? `Block-Dauer: +${diff} min (vorher ${curMin} min → neu ${val} min)`
-            : `Wert ≤ aktueller Stand (${curMin} min)`;
+            ? `+${diff} min (${curMin} → ${val} min)`
+            : `≤ Stand (${curMin} min)`;
           prevEl.style.color = diff > 0 ? 'var(--kit)' : 'var(--danger)';
         } else {
-          prevEl.textContent = `Aktueller Stand: ${curMin} min`;
+          prevEl.textContent = `Stand: ${curMin} min`;
           prevEl.style.color = 'var(--text-soft)';
         }
       }
     };
 
+    const commitMinutes = (rawVal, forcedMode = null) => {
+      const val = Math.round(Number(rawVal) || 0);
+      if (val <= 0) {
+        toast('Bitte gib eine echte Minutenzahl ein (oder klicke „Ohne Zeit abhaken“).', 'err');
+        inp.focus();
+        return;
+      }
+      const modeUsed = forcedMode || logMode;
+      const targetDate = getTargetDate();
+      const freshBefore = store.getDayBreakdown(targetDate);
+      const curMin = freshBefore[activeKind] || 0;
+      let totalToRecord;
+      let sessionMin;
+      if (modeUsed === 'total') {
+        totalToRecord = val;
+        sessionMin = val > curMin ? val - curMin : val;
+      } else {
+        sessionMin = val;
+        totalToRecord = store.state.mode === 'sum' ? val : curMin + val;
+      }
+      const finalAct = activeKind === 'a' ? 'anki' : activeKind === 'p' ? '' : actSel.value;
+      const chosenCat = catSel?.value || autoCatId || '';
+      const res = store.addEntry({
+        d: targetDate,
+        t: toTimeStr(),
+        k: activeKind,
+        m: totalToRecord,
+        mod: modSel.value,
+        act: finalAct,
+        catalogId: activeKind === 'a' ? '' : chosenCat,
+        note: item.title,
+        sessionMin
+      });
+      closeModal();
+      const wasPulled = (item.pulledFromDate && item.pulledFromDate > (item.d || today)) || (item.d && item.d > today);
+      const relievedDate = item.pulledFromDate || (item.d && item.d > today ? item.d : '');
+      const relievedLabel = relievedDate ? `${WEEKDAYS_DE[parseDateStr(relievedDate).getDay()]} (${fmtDateShort(relievedDate)})` : 'deine Restwoche';
+      toast(
+        res.ok
+          ? (wasPulled
+              ? `Stark vorgearbeitet! +${sessionMin} min gespeichert — ${relievedLabel} ist jetzt spürbar leichter.`
+              : modeUsed === 'total'
+                ? `Stand ${totalToRecord} min (+${sessionMin} min) für „${item.title}“ gespeichert.`
+                : `+${sessionMin} min für „${item.title}“ gespeichert (Stand: ${totalToRecord} min).`)
+          : res.message,
+        res.ok ? 'ok' : 'err'
+      );
+    };
+
     syncActLock();
     refreshPreview();
-    setTimeout(() => inp?.focus(), 30);
+
+    // 1-Tap immediate save on duration chips
+    modalEl.querySelectorAll('[data-quick-min]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        commitMinutes(Number(btn.getAttribute('data-quick-min')), 'add');
+      });
+    });
 
     inp.addEventListener('input', refreshPreview);
     kindSel.addEventListener('change', () => { syncActLock(); refreshPreview(); });
+    modSel?.addEventListener('change', refreshDetailsSummary);
+    actSel?.addEventListener('change', refreshDetailsSummary);
+    catSel?.addEventListener('change', refreshDetailsSummary);
     dateEl?.addEventListener('change', refreshPreview);
     modalEl.querySelector('#qlm-pick-orig')?.addEventListener('click', () => {
       if (dateEl && item.d) {
@@ -287,52 +387,7 @@ function promptLogFromChecklist(item) {
 
     modalEl.querySelector('#qlm-form')?.addEventListener('submit', (e) => {
       e.preventDefault();
-      const val = Math.round(Number(inp.value) || 0);
-      if (val <= 0) {
-        toast('Bitte gib eine echte Minutenzahl ein (oder klicke „Ohne Zeit abhaken“).', 'err');
-        inp.focus();
-        return;
-      }
-      const targetDate = getTargetDate();
-      // Compute fresh breakdown at submit time!
-      const freshBefore = store.getDayBreakdown(targetDate);
-      const curMin = freshBefore[activeKind] || 0;
-      let totalToRecord;
-      let sessionMin;
-      if (logMode === 'total') {
-        totalToRecord = val;
-        sessionMin = val > curMin ? val - curMin : val;
-      } else {
-        sessionMin = val;
-        totalToRecord = store.state.mode === 'sum' ? val : curMin + val;
-      }
-      const finalAct = activeKind === 'a' ? 'anki' : activeKind === 'p' ? '' : actSel.value;
-      const chosenCat = modalEl.querySelector('#qlm-cat')?.value || autoCatId || '';
-      const res = store.addEntry({
-        d: targetDate,
-        t: toTimeStr(),
-        k: activeKind,
-        m: totalToRecord,
-        mod: modalEl.querySelector('#qlm-mod').value,
-        act: finalAct,
-        catalogId: activeKind === 'a' ? '' : chosenCat,
-        note: item.title,
-        sessionMin
-      });
-      closeModal();
-      const wasPulled = (item.pulledFromDate && item.pulledFromDate > (item.d || today)) || (item.d && item.d > today);
-      const relievedDate = item.pulledFromDate || (item.d && item.d > today ? item.d : '');
-      const relievedLabel = relievedDate ? `${WEEKDAYS_DE[parseDateStr(relievedDate).getDay()]} (${fmtDateShort(relievedDate)})` : 'deine Restwoche';
-      toast(
-        res.ok
-          ? (wasPulled
-              ? `Stark vorgearbeitet! +${sessionMin} min gespeichert — ${relievedLabel} ist jetzt spürbar leichter.`
-              : logMode === 'total'
-                ? `Stand ${totalToRecord} min (+${sessionMin} min) für „${item.title}“ gespeichert.`
-                : `+${sessionMin} min für „${item.title}“ gespeichert (Stand: ${totalToRecord} min).`)
-          : res.message,
-        res.ok ? 'ok' : 'err'
-      );
+      commitMinutes(inp.value);
     });
   });
 }
@@ -553,7 +608,7 @@ document.getElementById('theme-toggle-mobile')?.addEventListener('click', cycleT
   });
 });
 
-// Touch swipe between tabs on mobile
+// Touch swipe between tabs on mobile (strict horizontal threshold + ignore interactive rows)
 let touchStartX = 0;
 let touchStartY = 0;
 viewRoot.addEventListener('touchstart', (e) => {
@@ -566,28 +621,13 @@ viewRoot.addEventListener('touchend', (e) => {
   if (!e.changedTouches.length) return;
   const dx = e.changedTouches[0].clientX - touchStartX;
   const dy = e.changedTouches[0].clientY - touchStartY;
-  if (Math.abs(dx) < 75 || Math.abs(dy) > Math.abs(dx) * 0.6) return;
-  if (e.target.closest('.chart-box, .heatmap-wrap, input, textarea, select')) return;
+  if (Math.abs(dx) <= 95 || Math.abs(dy) >= 35) return;
+  if (e.target.closest('.chart-box, .heatmap-wrap, .chip-row, .segmented, .quick-dur-chips, input, textarea, select')) return;
 
   const idx = TABS.indexOf(currentTab);
   if (dx < 0 && idx < TABS.length - 1) navigate(TABS[idx + 1]);
   else if (dx > 0 && idx > 0) navigate(TABS[idx - 1]);
 }, { passive: true });
-
-// Diagnostics
-let lastBeat = performance.now();
-setInterval(() => {
-  const now = performance.now();
-  const delta = now - lastBeat;
-  lastBeat = now;
-  const lag = delta - 1000;
-  if (delta > (store.state.dg.tmax || 0) && delta < 10000) store.state.dg.tmax = Number(delta.toFixed(1));
-  if (lag > 250 && document.visibilityState === 'visible') {
-    store.state.dg.n = (store.state.dg.n || 0) + 1;
-    if (lag > (store.state.dg.max || 0)) store.state.dg.max = Math.round(lag);
-    store.state.dg.at = Date.now();
-  }
-}, 1000);
 
 store.setReconcileHook(reconcileBacklogStatus);
 store.onStorageError((msg, severity) => {

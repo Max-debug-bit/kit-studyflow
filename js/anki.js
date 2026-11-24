@@ -91,24 +91,11 @@ export async function syncAnkiConnect({ alsoLogStudyTime = false } = {}) {
   }
   decks.sort((a, b) => b.due - a.due);
 
-  let todayMinutes = store.state.anki.todayMinutes || 0;
-  try {
-    const reviewedToday = await ankiInvoke('getNumCardsReviewedToday', {}, url);
-    if (typeof reviewedToday === 'number' && reviewedToday > 0) {
-      todayMinutes = Math.round((reviewedToday * (store.state.anki.secReview || 18)) / 60);
-    }
-  } catch { /* optional */ }
-
   store.state.anki.decks = decks;
-  store.state.anki.todayMinutes = todayMinutes;
   store.state.anki.lastSyncAt = Date.now();
   store.state.anki.updatedAt = Date.now();
   store.state.anki.mode = 'auto';
   store.save();
-
-  if (alsoLogStudyTime && todayMinutes >= 1) {
-    store.addEntry({ d: toDateStr(), t: toTimeStr(), m: todayMinutes, k: 'a', act: 'anki' });
-  }
 
   const summary = getAnkiLoadSummary();
   return {
@@ -119,8 +106,7 @@ export async function syncAnkiConnect({ alsoLogStudyTime = false } = {}) {
     newCards: summary.totalNew,
     learnCards: summary.totalLearn,
     reviewCards: summary.totalReview,
-    estMinutes: summary.estMinutes,
-    todayMinutes
+    estMinutes: summary.estMinutes
   };
 }
 

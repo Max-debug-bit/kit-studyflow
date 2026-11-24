@@ -18,8 +18,6 @@ import { renderQrSvg, encodePairingCode } from '../qr.js';
 import { icon } from '../icons.js';
 
 let activeSubtab = 'achievements';
-let wipeConfirmArmed = false;
-let wipeConfirmTimer = null;
 
 export function setMoreSubtab(tab) {
   if (tab === 'achievements' || tab === 'settings') activeSubtab = tab;
@@ -123,16 +121,7 @@ export function renderMoreView(root, ctx) {
           <form id="set-core-form" class="stack">
             <div class="field-grid">
               <div class="field"><label>Mindestziel (Minuten)</label><input type="number" id="s-goal" class="input mono" min="15" max="960" value="${store.state.goal}" /></div>
-              <div class="field">
-                <label>Zählregel</label>
-                <select id="s-mode" class="input">
-                  <option value="max" ${store.state.mode === 'max' ? 'selected' : ''}>Höchster Wert</option>
-                  <option value="last" ${store.state.mode === 'last' ? 'selected' : ''}>Letzter Eintrag</option>
-                  <option value="sum" ${store.state.mode === 'sum' ? 'selected' : ''}>Alles addieren</option>
-                </select>
-              </div>
               <div class="field"><label>Standard-Schlafzeit</label><input type="time" id="s-sleep" class="input mono" value="${store.state.sl}" /></div>
-              <div class="field"><label>Koffein-Limit (mg)</label><input type="number" id="s-cl" class="input mono" min="50" max="1000" value="${store.state.cl || 400}" /></div>
               <div class="field">
                 <label>Design</label>
                 <select id="s-theme" class="input">
@@ -142,12 +131,6 @@ export function renderMoreView(root, ctx) {
                 </select>
               </div>
             </div>
-            <div class="field-grid">
-              <div class="field"><label>Aufwachen freie Tage</label><input type="time" id="s-wakefree" class="input mono" value="${store.state.planningPrefs?.defaultWakeFreeDay || '10:00'}" /></div>
-              <div class="field"><label>Start-Puffer freie Tage (min)</label><input type="number" id="s-offset" class="input mono" min="0" max="180" value="${store.state.planningPrefs?.freeDayStartOffsetMin ?? 45}" /></div>
-              <div class="field"><label>Mindest-Anki / Tag (min)</label><input type="number" id="s-minanki" class="input mono" min="5" max="180" value="${store.state.anki.minDailyAnkiMin || 30}" /></div>
-              <div class="field"><label>Ruhetag-Ziel (min)</label><input type="number" id="s-restmin" class="input mono" min="0" max="180" value="${store.state.planningPrefs?.restDayMinMinutes ?? 30}" /></div>
-            </div>
             <label class="row" style="cursor:pointer;">
               <input type="checkbox" id="s-sunfree" ${store.state.planningPrefs?.sundayFree !== false ? 'checked' : ''} />
               <span class="small">Sonntag standardmäßig frei lassen (außer Anki-Reviews) & Serie am Sonntag schützen</span>
@@ -156,6 +139,24 @@ export function renderMoreView(root, ctx) {
               <input type="checkbox" id="s-autolec" ${store.state.autoLogLectures ? 'checked' : ''} />
               <span class="small">Besuchte Live-Vorlesungen aus dem KIT-Kalender automatisch als Vorlesung / Produktiv verbuchen</span>
             </label>
+            <details style="padding:8px 10px;border-radius:var(--radius-xs);background:var(--bg-soft);border:1px solid var(--border);">
+              <summary class="xs muted" style="cursor:pointer;font-weight:580;">Erweiterte Parameter (Zählregel, Koffein-Limit, Start-Puffer &amp; Anki-Minimum)</summary>
+              <div class="field-grid" style="margin-top:10px;">
+                <div class="field">
+                  <label>Zählregel</label>
+                  <select id="s-mode" class="input">
+                    <option value="max" ${store.state.mode === 'max' ? 'selected' : ''}>Höchster Wert (Focus Friend)</option>
+                    <option value="last" ${store.state.mode === 'last' ? 'selected' : ''}>Letzter Eintrag</option>
+                    <option value="sum" ${store.state.mode === 'sum' ? 'selected' : ''}>Alles addieren</option>
+                  </select>
+                </div>
+                <div class="field"><label>Koffein-Limit (mg)</label><input type="number" id="s-cl" class="input mono" min="50" max="1000" value="${store.state.cl || 400}" /></div>
+                <div class="field"><label>Aufwachen freie Tage</label><input type="time" id="s-wakefree" class="input mono" value="${store.state.planningPrefs?.defaultWakeFreeDay || '10:00'}" /></div>
+                <div class="field"><label>Start-Puffer freie Tage (min)</label><input type="number" id="s-offset" class="input mono" min="0" max="180" value="${store.state.planningPrefs?.freeDayStartOffsetMin ?? 45}" /></div>
+                <div class="field"><label>Mindest-Anki / Tag (min)</label><input type="number" id="s-minanki" class="input mono" min="5" max="180" value="${store.state.anki.minDailyAnkiMin || 30}" /></div>
+                <div class="field"><label>Ruhetag-Ziel (min)</label><input type="number" id="s-restmin" class="input mono" min="0" max="180" value="${store.state.planningPrefs?.restDayMinMinutes ?? 30}" /></div>
+              </div>
+            </details>
             <div class="row" style="justify-content:flex-end;">
               <button type="submit" class="btn btn-primary btn-sm">Speichern</button>
             </div>
@@ -200,7 +201,7 @@ export function renderMoreView(root, ctx) {
           <div class="card-header">
             <h2 class="card-title">${icon('cloud', 15)} GitHub Gist Cloud-Sync (Win 11 ↔ Pixel 9a)</h2>
             <div class="row" style="gap:6px;">
-              <span class="pill">App v17</span>
+              <span class="pill">App v18</span>
               <span class="pill ${store.secrets.lastSyncStatus === 'ok' ? 'kit' : store.secrets.lastSyncStatus === 'err' ? 'danger' : ''}">
                 ${store.secrets.lastSyncAt ? `Sync ${toTimeStr(new Date(store.secrets.lastSyncAt))}` : 'Lokal'}
               </span>
@@ -221,16 +222,20 @@ export function renderMoreView(root, ctx) {
             <span class="small">Änderungen automatisch synchronisieren</span>
           </label>
           <div class="row">
-            <button class="btn btn-primary btn-sm" id="btn-save-gist">Speichern</button>
-            <button class="btn btn-sm" id="btn-sync-now">${icon('refresh', 13)} Jetzt syncen</button>
-            <button class="btn btn-sm" id="btn-push-gist" title="Überschreibt die Cloud direkt mit diesem Gerät">${icon('upload', 13)} Lokal → Cloud</button>
-            <button class="btn btn-sm" id="btn-pull-gist" title="Lädt den kompletten Stand aus der Cloud auf dieses Gerät">${icon('download', 13)} Cloud → Lokal</button>
-            <button class="btn btn-sm" id="btn-create-gist">${icon('plus', 13)} Privaten Gist anlegen</button>
-            <button class="btn btn-sm" id="btn-gist-archives">${icon('calendar', 13)} Wochen-Archive</button>
-            <button class="btn btn-sm" id="btn-pair-qr">${icon('spark', 13)} Handy koppeln (QR)</button>
-            <button class="btn btn-sm" id="btn-pair-paste">Mit Code koppeln</button>
-            <button class="btn btn-sm" id="btn-force-update" title="Leert nur den App-Cache (deine Daten bleiben 100 % erhalten)">App-Update erzwingen</button>
+            <button class="btn btn-primary btn-sm" id="btn-sync-now">${icon('refresh', 13)} Jetzt syncen</button>
+            <button class="btn btn-sm" id="btn-pair-open">${icon('spark', 13)} Gerät koppeln</button>
           </div>
+          <details style="margin-top:10px;padding:8px 10px;border-radius:var(--radius-xs);background:var(--bg-soft);border:1px solid var(--border);">
+            <summary class="xs muted" style="cursor:pointer;font-weight:580;">Erweitert &amp; Notfall (Überschreiben, Archive, Gist anlegen, Cache)</summary>
+            <div class="row" style="margin-top:10px;gap:6px;">
+              <button class="btn btn-sm" id="btn-save-gist">Zugangsdaten speichern</button>
+              <button class="btn btn-sm" id="btn-create-gist">${icon('plus', 13)} Privaten Gist anlegen</button>
+              <button class="btn btn-sm" id="btn-gist-archives">${icon('calendar', 13)} Wochen-Archive</button>
+              <button class="btn btn-sm" id="btn-push-gist" title="Überschreibt die Cloud direkt mit diesem Gerät">${icon('upload', 13)} Lokal → Cloud</button>
+              <button class="btn btn-sm" id="btn-pull-gist" title="Lädt den kompletten Stand aus der Cloud auf dieses Gerät">${icon('download', 13)} Cloud → Lokal</button>
+              <button class="btn btn-sm" id="btn-force-update" title="Leert nur den App-Cache (deine Daten bleiben 100 % erhalten)">App-Update erzwingen</button>
+            </div>
+          </details>
           ${store.secrets.lastArchiveWeek ? `<div class="xs soft" style="margin-top:6px;">Letztes automatisches Wochen-Archiv: <span class="mono">${esc(store.secrets.lastArchiveWeek)}</span> (behält letzte 4 Wochen)</div>` : ''}
           ${store.secrets.lastSyncError ? `<div class="xs" style="color:var(--danger);margin-top:8px;">Fehler: ${esc(store.secrets.lastSyncError)}</div>` : ''}
         </section>
@@ -303,25 +308,14 @@ export function renderMoreView(root, ctx) {
           </details>
         </section>
 
-        <!-- 6. Diagnose & Alles löschen -->
-        <div class="grid-2">
-          <section class="card">
-            <div class="card-header"><h2 class="card-title">${icon('activity', 15)} Diagnose</h2></div>
-            <div class="small muted">
-              Erkannte Hänger (&gt; 250 ms): <strong class="mono" style="color:var(--text);">${store.state.dg.n || 0}</strong><br/>
-              Längster Hänger: <strong class="mono" style="color:var(--text);">${Math.round(store.state.dg.max || 0)} ms</strong><br/>
-              Max. Frame-Zeit: <strong class="mono" style="color:var(--text);">${(store.state.dg.tmax || 0).toFixed(1)} ms</strong>
-            </div>
-          </section>
-
-          <section class="card">
-            <div class="card-header"><h2 class="card-title" style="color:var(--danger);">${icon('trash', 15)} Alles löschen</h2></div>
-            <p class="xs muted" style="margin-top:0;">Entfernt alle lokalen Einträge, Aufwachzeiten, Koffein-Daten und Checklisten (zweimal drücken).</p>
-            <button class="btn btn-danger btn-sm" id="btn-wipe-all">
-              ${wipeConfirmArmed ? 'Wirklich ALLES löschen? (2/2)' : 'Alles löschen (1/2)'}
-            </button>
-          </section>
-        </div>
+        <!-- 6. Alles löschen -->
+        <section class="card">
+          <div class="card-header"><h2 class="card-title" style="color:var(--danger);">${icon('trash', 15)} Alle lokalen Daten löschen</h2></div>
+          <p class="xs muted" style="margin-top:0;">Entfernt alle lokalen Einträge, Aufwachzeiten, Koffein-Daten und Checklisten nach expliziter Bestätigung.</p>
+          <button class="btn btn-danger btn-sm" id="btn-wipe-all">
+            ${icon('trash', 13)} Alle lokalen Daten löschen...
+          </button>
+        </section>
       </div>
     `}
   `;
@@ -405,27 +399,77 @@ export function renderMoreView(root, ctx) {
       toast(`Fehler: ${res.error || res.reason}`, 'err');
     }
   });
-  root.querySelector('#btn-push-gist')?.addEventListener('click', async () => {
+  root.querySelector('#btn-push-gist')?.addEventListener('click', () => {
     saveGistInputs();
-    const res = await pushToGist({ forceArchive: false });
-    renderMoreView(root, ctx);
-    if (res.ok) {
-      const s = res.summary || store.secrets.lastRemoteSummary;
-      toast(s ? `In Cloud hochgeladen: ${s.chk} Todos · ${s.anki} Ankis` : 'In Cloud hochgeladen.', 'ok');
-    } else {
-      toast(`Upload-Fehler: ${res.error || res.reason}`, 'err');
+    if (!store.secrets.githubToken || !store.secrets.gistId) {
+      toast('Bitte zuerst GitHub Token & Gist-ID eintragen.', 'err');
+      return;
     }
+    openModal(`
+      <div class="card-header">
+        <h3 class="card-title">Cloud-Stand überschreiben?</h3>
+        <button class="icon-btn" id="m-close">${icon('x', 15)}</button>
+      </div>
+      <p class="small muted" style="margin-top:0;">
+        <strong>Lokal → Cloud</strong> überschreibt deinen gesamten GitHub Gist direkt mit dem Stand dieses Geräts (ohne vorheriges Zusammenführen).
+      </p>
+      <div class="row" style="justify-content:flex-end;margin-top:12px;">
+        <button type="button" class="btn btn-sm" id="m-cancel">Abbrechen</button>
+        <button type="button" class="btn btn-danger btn-sm" id="m-confirm">${icon('upload', 13)} Ja, Cloud überschreiben</button>
+      </div>
+    `, (modalEl) => {
+      modalEl.querySelector('#m-close')?.addEventListener('click', closeModal);
+      modalEl.querySelector('#m-cancel')?.addEventListener('click', closeModal);
+      modalEl.querySelector('#m-confirm')?.addEventListener('click', async () => {
+        const btn = modalEl.querySelector('#m-confirm');
+        if (btn) btn.disabled = true;
+        const res = await pushToGist({ forceArchive: false, force: true });
+        closeModal();
+        renderMoreView(root, ctx);
+        if (res.ok) {
+          const s = res.summary || store.secrets.lastRemoteSummary;
+          toast(s ? `In Cloud hochgeladen: ${s.chk} Todos · ${s.anki} Ankis` : 'In Cloud hochgeladen.', 'ok');
+        } else {
+          toast(`Upload-Fehler: ${res.error || res.reason}`, 'err');
+        }
+      });
+    });
   });
-  root.querySelector('#btn-pull-gist')?.addEventListener('click', async () => {
+  root.querySelector('#btn-pull-gist')?.addEventListener('click', () => {
     saveGistInputs();
-    const res = await pullFromGist({ preferRemote: true });
-    renderMoreView(root, ctx);
-    if (res.ok) {
-      const s = res.summary || store.secrets.lastRemoteSummary;
-      toast(s ? `Aus Cloud geladen: ${s.chk} Todos · ${s.anki} Ankis` : 'Aus Cloud geladen.', 'ok');
-    } else {
-      toast(`Lade-Fehler: ${res.error || res.reason}`, 'err');
+    if (!store.secrets.githubToken || !store.secrets.gistId) {
+      toast('Bitte zuerst GitHub Token & Gist-ID eintragen.', 'err');
+      return;
     }
+    openModal(`
+      <div class="card-header">
+        <h3 class="card-title">Lokalen Stand aus Cloud überschreiben?</h3>
+        <button class="icon-btn" id="m-close">${icon('x', 15)}</button>
+      </div>
+      <p class="small muted" style="margin-top:0;">
+        <strong>Cloud → Lokal</strong> ersetzt deine lokalen Daten auf diesem Gerät direkt durch den Stand im GitHub Gist.
+      </p>
+      <div class="row" style="justify-content:flex-end;margin-top:12px;">
+        <button type="button" class="btn btn-sm" id="m-cancel">Abbrechen</button>
+        <button type="button" class="btn btn-danger btn-sm" id="m-confirm">${icon('download', 13)} Ja, aus Cloud laden</button>
+      </div>
+    `, (modalEl) => {
+      modalEl.querySelector('#m-close')?.addEventListener('click', closeModal);
+      modalEl.querySelector('#m-cancel')?.addEventListener('click', closeModal);
+      modalEl.querySelector('#m-confirm')?.addEventListener('click', async () => {
+        const btn = modalEl.querySelector('#m-confirm');
+        if (btn) btn.disabled = true;
+        const res = await pullFromGist({ preferRemote: true });
+        closeModal();
+        renderMoreView(root, ctx);
+        if (res.ok) {
+          const s = res.summary || store.secrets.lastRemoteSummary;
+          toast(s ? `Aus Cloud geladen: ${s.chk} Todos · ${s.anki} Ankis` : 'Aus Cloud geladen.', 'ok');
+        } else {
+          toast(`Lade-Fehler: ${res.error || res.reason}`, 'err');
+        }
+      });
+    });
   });
   root.querySelector('#btn-force-update')?.addEventListener('click', async () => {
     try {
@@ -555,51 +599,82 @@ export function renderMoreView(root, ctx) {
     });
   });
 
-  // Pixel 9a Offline QR Pairing (#8 – PIN-encrypted by default + localhost guard + Web Crypto error check)
-  root.querySelector('#btn-pair-qr')?.addEventListener('click', () => {
+  // Combined Device Pairing Modal (QR-Code Laptop + Code Paste Handy)
+  root.querySelector('#btn-pair-open')?.addEventListener('click', () => {
     saveGistInputs();
-    if (!store.secrets.githubToken || !store.secrets.gistId) {
-      toast('Bitte zuerst GitHub Token & Gist-ID eintragen (oder Gist anlegen).', 'err');
-      return;
-    }
+    const hasCreds = Boolean(store.secrets.githubToken && store.secrets.gistId);
+    let pairTab = hasCreds ? 'qr' : 'paste';
     const isLocalOrigin = location.hostname === '127.0.0.1' || location.hostname === 'localhost';
     const savedPublicUrl = (store.secrets.publicAppUrl || '').trim();
     const defaultTargetUrl = isLocalOrigin ? savedPublicUrl : `${location.origin}${location.pathname}`;
 
     openModal(`
       <div class="card-header">
-        <h3 class="card-title">Pixel 9a per QR-Code koppeln</h3>
+        <h3 class="card-title">Gerät koppeln (Laptop ↔ Handy)</h3>
         <button class="icon-btn" id="m-close">${icon('x', 15)}</button>
       </div>
-      <p class="xs muted" style="margin-top:0;">
-        Der QR-Code wird 100 % lokal offline erzeugt. Standardmäßig werden Token & Key per <strong>AES-256-GCM mit deiner PIN</strong> verschlüsselt.
-      </p>
-      <div class="stack">
-        ${isLocalOrigin ? `
-          <div class="banner warn" style="margin:0;">
-            <span class="xs"><strong>Lokaler Start erkannt (${esc(location.origin)}):</strong> Ein QR-Link auf <code>127.0.0.1</code> funktioniert am Handy nicht. Trag deine GitHub-Pages-URL ein oder nutze „Kopplungs-Code kopieren“.</span>
-          </div>
-          <div class="field">
-            <label>GitHub-Pages-URL der App (für QR-Link am Handy)</label>
-            <input type="url" id="qr-target-url" class="input mono" value="${esc(defaultTargetUrl)}" placeholder="https://dein-name.github.io/kit-study-planner/" />
-          </div>
-        ` : ''}
-        <div class="row">
-          <input type="password" id="qr-pin" class="input mono" style="flex:1;" placeholder="PIN (Standard: 4–6 Ziffern für AES-Schutz)" autocomplete="off" />
-          <label class="row xs muted" style="cursor:pointer;">
-            <input type="checkbox" id="qr-inc-ai" checked /> Gemini-Key mitgeben
-          </label>
-          <button class="btn btn-primary btn-sm" id="qr-gen">QR erzeugen</button>
-        </div>
-        <label class="row xs muted" style="cursor:pointer;">
-          <input type="checkbox" id="qr-allow-plain" />
-          Ohne PIN erlauben (unverschlüsselt — nur privat scannen)
-        </label>
-        <div id="qr-out" class="stack hidden" style="align-items:center;padding-top:8px;"></div>
+      <div class="segmented" style="margin-bottom:12px;">
+        <button type="button" data-pair-tab="qr" class="${pairTab === 'qr' ? 'active' : ''}">QR erzeugen (Laptop)</button>
+        <button type="button" data-pair-tab="paste" class="${pairTab === 'paste' ? 'active' : ''}">Mit Code verbinden (Handy)</button>
       </div>
+
+      <!-- Panel A: QR Generator -->
+      <div id="pair-panel-qr" class="stack ${pairTab !== 'qr' ? 'hidden' : ''}">
+        ${!hasCreds ? `
+          <div class="banner warn" style="margin:0;">
+            <span class="xs">Bitte zuerst oben GitHub Token &amp; Gist-ID eintragen (oder unter „Erweitert &amp; Notfall“ einen privaten Gist anlegen).</span>
+          </div>
+        ` : `
+          <p class="xs muted" style="margin:0;">
+            Der QR-Code wird 100 % lokal offline erzeugt. Standardmäßig werden Token &amp; Key per <strong>AES-256-GCM mit deiner PIN</strong> verschlüsselt.
+          </p>
+          ${isLocalOrigin ? `
+            <div class="banner warn" style="margin:0;">
+              <span class="xs"><strong>Lokaler Start erkannt (${esc(location.origin)}):</strong> Ein QR-Link auf <code>127.0.0.1</code> funktioniert am Handy nicht. Trag deine GitHub-Pages-URL ein oder nutze „Kopplungs-Code kopieren“.</span>
+            </div>
+            <div class="field">
+              <label>GitHub-Pages-URL der App (für QR-Link am Handy)</label>
+              <input type="url" id="qr-target-url" class="input mono" value="${esc(defaultTargetUrl)}" placeholder="https://dein-name.github.io/kit-study-planner/" />
+            </div>
+          ` : ''}
+          <div class="row">
+            <input type="password" id="qr-pin" class="input mono" style="flex:1;" placeholder="PIN (Standard: 4–6 Ziffern für AES-Schutz)" autocomplete="off" />
+            <label class="row xs muted" style="cursor:pointer;">
+              <input type="checkbox" id="qr-inc-ai" checked /> Gemini-Key mitgeben
+            </label>
+            <button type="button" class="btn btn-primary btn-sm" id="qr-gen">QR erzeugen</button>
+          </div>
+          <label class="row xs muted" style="cursor:pointer;">
+            <input type="checkbox" id="qr-allow-plain" />
+            Ohne PIN erlauben (unverschlüsselt — nur privat scannen)
+          </label>
+          <div id="qr-out" class="stack hidden" style="align-items:center;padding-top:8px;"></div>
+        `}
+      </div>
+
+      <!-- Panel B: Paste Code -->
+      <form id="pair-panel-paste" class="stack ${pairTab !== 'paste' ? 'hidden' : ''}">
+        <p class="xs muted" style="margin:0;">
+          Füge den am Laptop kopierten <code>P1...</code> (oder <code>P0...</code>) Kopplungs-Code ein, um Token &amp; Gist-ID sofort zu übernehmen.
+        </p>
+        <textarea id="pair-paste-val" class="input mono" placeholder="P1.... oder P0.... hier einfügen" required></textarea>
+        <div class="row" style="justify-content:flex-end;">
+          <button type="submit" class="btn btn-primary btn-sm">Koppeln</button>
+        </div>
+      </form>
     `, (modalEl) => {
       modalEl.querySelector('#m-close')?.addEventListener('click', closeModal);
-      const renderCode = async () => {
+
+      modalEl.querySelectorAll('[data-pair-tab]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          pairTab = btn.getAttribute('data-pair-tab');
+          modalEl.querySelectorAll('[data-pair-tab]').forEach((b) => b.classList.toggle('active', b === btn));
+          modalEl.querySelector('#pair-panel-qr')?.classList.toggle('hidden', pairTab !== 'qr');
+          modalEl.querySelector('#pair-panel-paste')?.classList.toggle('hidden', pairTab !== 'paste');
+        });
+      });
+
+      modalEl.querySelector('#qr-gen')?.addEventListener('click', async () => {
         const pin = modalEl.querySelector('#qr-pin').value.trim();
         const allowPlain = Boolean(modalEl.querySelector('#qr-allow-plain')?.checked);
         if (!pin && !allowPlain) {
@@ -638,10 +713,10 @@ export function renderMoreView(root, ctx) {
           out.innerHTML = `
             <div class="xs" style="color:var(--gold);text-align:center;">
               Keine gültige GitHub-Pages-URL angegeben — daher kein <code>127.0.0.1</code>-QR erzeugt.<br/>
-              Kopiere einfach den ${pin ? 'AES-verschlüsselten' : 'unverschlüsselten'} Code und füge ihn am Handy unter <strong>Mit Code koppeln</strong> ein:
+              Kopiere einfach den ${pin ? 'AES-verschlüsselten' : 'unverschlüsselten'} Code und füge ihn am Handy unter <strong>Mit Code verbinden</strong> ein:
             </div>
             <div class="row">
-              <button class="btn btn-primary btn-sm" id="qr-copy-code">${icon('copy', 13)} Kopplungs-Code kopieren</button>
+              <button type="button" class="btn btn-primary btn-sm" id="qr-copy-code">${icon('copy', 13)} Kopplungs-Code kopieren</button>
             </div>
           `;
         } else {
@@ -650,7 +725,7 @@ export function renderMoreView(root, ctx) {
             <div style="padding:10px;background:#fff;border-radius:12px;">${renderQrSvg(pairUrl, 230)}</div>
             <div class="xs muted">${pin ? 'AES-256-GCM PIN-verschlüsselt' : 'Unverschlüsselt (nur privat scannen)'} · Ziel: <span class="mono">${esc(baseUrl)}</span></div>
             <div class="row">
-              <button class="btn btn-sm" id="qr-copy-code">${icon('copy', 13)} Kopplungs-Code kopieren</button>
+              <button type="button" class="btn btn-sm" id="qr-copy-code">${icon('copy', 13)} Kopplungs-Code kopieren</button>
             </div>
           `;
         }
@@ -658,26 +733,9 @@ export function renderMoreView(root, ctx) {
           try { await navigator.clipboard.writeText(code); toast('Kopplungs-Code kopiert.', 'ok'); }
           catch { toast('Kopieren fehlgeschlagen.', 'err'); }
         });
-      };
-      modalEl.querySelector('#qr-gen')?.addEventListener('click', renderCode);
-    });
-  });
+      });
 
-  root.querySelector('#btn-pair-paste')?.addEventListener('click', () => {
-    openModal(`
-      <div class="card-header">
-        <h3 class="card-title">Mit Kopplungs-Code verbinden</h3>
-        <button class="icon-btn" id="m-close">${icon('x', 15)}</button>
-      </div>
-      <form id="pair-paste-form" class="stack">
-        <textarea id="pair-paste-val" class="input mono" placeholder="P0.... oder P1.... hier einfügen" required></textarea>
-        <div class="row" style="justify-content:flex-end;">
-          <button type="submit" class="btn btn-primary btn-sm">Koppeln</button>
-        </div>
-      </form>
-    `, (modalEl) => {
-      modalEl.querySelector('#m-close')?.addEventListener('click', closeModal);
-      modalEl.querySelector('#pair-paste-form')?.addEventListener('submit', (e) => {
+      modalEl.querySelector('#pair-panel-paste')?.addEventListener('submit', (e) => {
         e.preventDefault();
         const code = modalEl.querySelector('#pair-paste-val').value.trim();
         closeModal();
@@ -766,27 +824,33 @@ export function renderMoreView(root, ctx) {
   });
 
   root.querySelector('#btn-wipe-all')?.addEventListener('click', () => {
-    if (!wipeConfirmArmed) {
-      wipeConfirmArmed = true;
-      renderMoreView(root, ctx);
-      clearTimeout(wipeConfirmTimer);
-      wipeConfirmTimer = setTimeout(() => {
-        wipeConfirmArmed = false;
-        const b = document.getElementById('btn-wipe-all');
-        if (b) b.textContent = 'Alles löschen (1/2)';
-      }, 6000);
-      return;
-    }
-    clearTimeout(wipeConfirmTimer);
-    wipeConfirmArmed = false;
-    const hasCloud = isGistConfigured() && Boolean(store.secrets.gistId);
-    store.wipeAllData({ skipSync: hasCloud });
-    toast('Alle lokalen Daten gelöscht.', 'err', { undo: true });
-    if (hasCloud) {
-      promptCloudOverwrite(
-        'Cloud-Stand ebenfalls leeren?',
-        'Alle lokalen Daten wurden gelöscht. Soll der private GitHub Gist ebenfalls geleert werden, oder willst du Auto-Sync pausieren, damit die alten Daten nicht zurückgeladen werden?'
-      );
-    }
+    openModal(`
+      <div class="card-header">
+        <h3 class="card-title" style="color:var(--danger);">Wirklich alle lokalen Daten löschen?</h3>
+        <button class="icon-btn" id="m-close">${icon('x', 15)}</button>
+      </div>
+      <p class="small muted" style="margin-top:0;">
+        Entfernt alle lokalen Lernzeiten, Checklisten, Rückstände, Aufwachzeiten und Koffein-Daten. Direkt danach erscheint ein Rückgängig-Hinweis.
+      </p>
+      <div class="row" style="justify-content:flex-end;margin-top:12px;">
+        <button type="button" class="btn btn-sm" id="m-cancel">Abbrechen</button>
+        <button type="button" class="btn btn-danger btn-sm" id="m-wipe-go">${icon('trash', 13)} Ja, alles löschen</button>
+      </div>
+    `, (modalEl) => {
+      modalEl.querySelector('#m-close')?.addEventListener('click', closeModal);
+      modalEl.querySelector('#m-cancel')?.addEventListener('click', closeModal);
+      modalEl.querySelector('#m-wipe-go')?.addEventListener('click', () => {
+        closeModal();
+        const hasCloud = isGistConfigured() && Boolean(store.secrets.gistId);
+        store.wipeAllData({ skipSync: hasCloud });
+        toast('Alle lokalen Daten gelöscht.', 'err', { undo: true });
+        if (hasCloud) {
+          promptCloudOverwrite(
+            'Cloud-Stand ebenfalls leeren?',
+            'Alle lokalen Daten wurden gelöscht. Soll der private GitHub Gist ebenfalls geleert werden, oder willst du Auto-Sync pausieren, damit die alten Daten nicht zurückgeladen werden?'
+          );
+        }
+      });
+    });
   });
 }

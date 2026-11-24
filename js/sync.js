@@ -279,12 +279,11 @@ export function mergeStates(localRaw, remoteRaw) {
     if (rSync > lSync || (rHasDecks && !lHasDecks && rSync >= lSync)) {
       merged.decks = rAnki.decks;
       merged.lastSyncAt = rSync;
-      if (rAnki.todayMinutes !== undefined) merged.todayMinutes = rAnki.todayMinutes;
     } else if (lSync > rSync || (lHasDecks && !rHasDecks && lSync >= rSync)) {
       merged.decks = lAnki.decks;
       merged.lastSyncAt = lSync;
-      if (lAnki.todayMinutes !== undefined) merged.todayMinutes = lAnki.todayMinutes;
     }
+    delete merged.todayMinutes;
 
     // Clean per-deck merge for excludedDecks so editing secNew on one device NEVER wipes excluded decks from another
     const lExMeta = (lAnki.excludedMeta && typeof lAnki.excludedMeta === 'object') ? lAnki.excludedMeta : {};
@@ -380,8 +379,6 @@ export function mergeStates(localRaw, remoteRaw) {
     checklist: mergeMutableById(local.checklist, remote.checklist),
     reminders: mergeMutableById(local.reminders, remote.reminders),
     customEvents: mergeMutableById(local.customEvents, remote.customEvents),
-    tasks: mergeMutableById(local.tasks, remote.tasks),
-    planBlocks: mergeMutableById(local.planBlocks, remote.planBlocks),
     taskCatalog: mergeMutableById(local.taskCatalog, remote.taskCatalog),
     taskCatalogSeeded: Boolean(local.taskCatalogSeeded || remote.taskCatalogSeeded),
     deletedIds,

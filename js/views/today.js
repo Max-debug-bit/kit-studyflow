@@ -93,12 +93,14 @@ export function renderTodayView(root, ctx) {
 
   // Today's checklist & lectures (includes dynamic daily Anki check-off)
   const todayItems = getChecklistForDay(today);
+  const openTodayCount = todayItems.filter((x) => !x.done).length;
   const doneCount = todayItems.filter((x) => x.done).length + (ankiDoneToday ? 1 : 0);
   const totalCheckCount = todayItems.length + 1;
   const checkPct = totalCheckCount ? Math.round((doneCount / totalCheckCount) * 100) : 0;
   const yesterdayOpen = getUnfinishedFromYesterday(today);
   const tomorrowItems = getChecklistForDay(tomorrow);
   const weekImpact = getWeekAheadImpact(today);
+  const autoOpenAhead = openTodayCount <= 1;
 
   const todayLectures = getDayLectures(today, now);
   const attendedLectures = todayLectures.filter((l) => l.attended);
@@ -212,8 +214,10 @@ export function renderTodayView(root, ctx) {
             </div>
           </div>
           <div class="check-actions">
-            <button class="btn btn-xs" id="btn-anki-row-sync" title="AnkiConnect jetzt abfragen">${icon('refresh', 12)} Sync</button>
+            <button class="btn btn-xs desktop-only" id="btn-anki-row-sync" title="AnkiConnect jetzt abfragen">${icon('refresh', 12)} Sync</button>
+            <button class="btn btn-xs btn-ghost mobile-only" id="btn-anki-mobile-hint" title="AnkiConnect läuft am Laptop">Laptop-Sync</button>
             <button class="btn btn-xs" id="btn-anki-row-log" title="Zwischenzeit loggen (ohne für heute abzuhaken)">+ Zeit</button>
+            <button class="btn btn-xs btn-ghost" id="btn-anki-open-details" title="Anki-Stapel & manuelle Eingabe öffnen">${icon('layers', 12)}</button>
           </div>
         </div>
 
@@ -253,37 +257,39 @@ export function renderTodayView(root, ctx) {
         </form>
 
         ${(weekImpact.candidates.length || weekImpact.boughtForwardMin > 0) ? `
-          <div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--border);">
-            <div class="row-between" style="margin-bottom:8px;gap:8px;">
+          <details style="margin-top:12px;padding-top:10px;border-top:1px solid var(--border);" ${autoOpenAhead ? 'open' : ''}>
+            <summary class="row-between" style="cursor:pointer;gap:8px;list-style:none;">
               <div class="row" style="gap:7px;">
-                <span class="xs mono" style="font-weight:700;letter-spacing:0.04em;color:var(--text);">VORARBEITEN-HEBEL (WOCHEN-WIRKUNG)</span>
-                ${weekImpact.boughtForwardMin > 0 ? `<span class="pill kit">Gekaufte Freizeit: +${fmtMin(weekImpact.boughtForwardMin)}</span>` : ''}
+                <span class="xs mono" style="font-weight:700;letter-spacing:0.04em;color:var(--text);">VORARBEITEN-HEBEL (${esc(weekImpact.horizonLabel || 'NÄCHSTE 5 TAGE')})</span>
+                ${weekImpact.boughtForwardMin > 0 ? `<span class="pill kit">+${fmtMin(weekImpact.boughtForwardMin)} vorgearbeitet</span>` : ''}
               </div>
               <span class="xs muted mono">
-                ${weekImpact.restWeekOpenCount > 0 ? `Restwoche offen: ~${fmtMin(weekImpact.restWeekOpenMin)} (${weekImpact.restWeekOpenCount})` : 'Restwoche komplett frei!'}
+                ${weekImpact.restWeekOpenCount > 0 ? `Offen: ~${fmtMin(weekImpact.restWeekOpenMin)} (${weekImpact.restWeekOpenCount}) ▾` : 'Alles voraus frei! ▾'}
               </span>
-            </div>
-            ${weekImpact.todayOpenMin > 0 && weekImpact.restWeekOpenMin > 0 ? `
-              <div class="xs muted" style="margin-bottom:8px;">
-                Wenn du heute alles abhakst (${fmtMin(weekImpact.todayOpenMin)}), erledigst du <strong style="color:var(--kit);">${Math.round((weekImpact.todayOpenMin / (weekImpact.todayOpenMin + weekImpact.restWeekOpenMin)) * 100)} %</strong> deines restlichen Wochenpensums.
-              </div>
-            ` : ''}
-            ${weekImpact.candidates.length ? `
-              <div class="entry-list">
-                ${weekImpact.candidates.map((c) => `
-                  <div class="entry-row" style="padding:7px 10px;">
-                    <div style="min-width:0;flex:1;">
-                      <div class="small" style="font-weight:580;">${esc(c.title)} <span class="xs soft mono">~${fmtMin(c.estMin)}</span></div>
-                      <div class="xs" style="color:${c.freesWholeDay ? 'var(--kit)' : 'var(--text-muted)'};margin-top:2px;">
-                        Wenn heute vorgezogen → <strong>${esc(c.impactText)}</strong>
+            </summary>
+            <div style="margin-top:8px;">
+              ${weekImpact.todayOpenMin > 0 && weekImpact.restWeekOpenMin > 0 ? `
+                <div class="xs muted" style="margin-bottom:8px;">
+                  Wenn du heute alles abhakst (${fmtMin(weekImpact.todayOpenMin)}), erledigst du <strong style="color:var(--kit);">${Math.round((weekImpact.todayOpenMin / (weekImpact.todayOpenMin + weekImpact.restWeekOpenMin)) * 100)} %</strong> deines Pensums der nächsten Tage.
+                </div>
+              ` : ''}
+              ${weekImpact.candidates.length ? `
+                <div class="entry-list">
+                  ${weekImpact.candidates.map((c) => `
+                    <div class="entry-row" style="padding:7px 10px;">
+                      <div style="min-width:0;flex:1;">
+                        <div class="small" style="font-weight:580;">${esc(c.title)} <span class="xs soft mono">~${fmtMin(c.estMin)}</span></div>
+                        <div class="xs" style="color:${c.freesWholeDay ? 'var(--kit)' : 'var(--text-muted)'};margin-top:2px;">
+                          Wenn heute vorgezogen → <strong>${esc(c.impactText)}</strong>
+                        </div>
                       </div>
+                      <button class="btn btn-xs" data-pull-today="${esc(c.id)}" title="Auf heute vorziehen">${icon('arrowLeft', 12)} Vorziehen</button>
                     </div>
-                    <button class="btn btn-xs" data-pull-today="${esc(c.id)}" title="Auf heute vorziehen">${icon('arrowLeft', 12)} Vorziehen</button>
-                  </div>
-                `).join('')}
-              </div>
-            ` : ''}
-          </div>
+                  `).join('')}
+                </div>
+              ` : ''}
+            </div>
+          </details>
         ` : tomorrowItems.length ? `
           <div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--border);">
             <div class="xs soft" style="margin-bottom:4px;font-family:var(--mono);">MORGEN (${fmtDateShort(tomorrow)}) · ${tomorrowItems.length} ${tomorrowItems.length === 1 ? 'PUNKT' : 'PUNKTE'}</div>
@@ -348,66 +354,69 @@ export function renderTodayView(root, ctx) {
           `}
         </section>
 
-        <!-- Anki Quick-Card (Weighted: Blue=New, Red=Learn, Green=Review) -->
-        <section class="card">
-          <div class="card-header">
-            <h2 class="card-title">${icon('layers', 15)} Anki-Reviews</h2>
-            <span class="pill anki">${anki.totalDue} Karten · ~${anki.estMinutes} min</span>
-          </div>
-          <div class="row-between" style="margin-bottom:10px;">
-            <div class="row xs mono" style="gap:10px;">
-              <span><span class="anki-dot blue"></span>Neu: ${anki.totalNew}</span>
-              <span><span class="anki-dot red"></span>Rot: ${anki.totalLearn}</span>
-              <span><span class="anki-dot green"></span>Grün: ${anki.totalReview}</span>
+        <!-- Anki Quick-Card (Standardmäßig eingeklappt; per Hero-Zeile oder Klick aufklappbar) -->
+        <section class="card ${ui.d_anki_card ? '' : 'collapsed'}" data-collapse="d_anki_card" id="anki-detail-card">
+          <button class="collapsible-header" data-toggle="d_anki_card">
+            <h2 class="card-title">${icon('layers', 15)} Anki-Details <span class="pill anki">${anki.totalDue} Karten · ~${anki.estMinutes} min</span></h2>
+            <span class="chevron">${icon('chevron', 16)}</span>
+          </button>
+          <div class="collapsible-body">
+            <div class="row-between" style="margin-bottom:10px;">
+              <div class="row xs mono" style="gap:10px;">
+                <span><span class="anki-dot blue"></span>Neu: ${anki.totalNew}</span>
+                <span><span class="anki-dot red"></span>Rot: ${anki.totalLearn}</span>
+                <span><span class="anki-dot green"></span>Grün: ${anki.totalReview}</span>
+              </div>
+              <div class="row" style="gap:6px;">
+                <button class="btn btn-xs desktop-only" id="btn-anki-sync">${icon('refresh', 12)} Sync</button>
+                <span class="xs soft mobile-only">Sync am Laptop mit Anki</span>
+                <button class="btn btn-xs btn-primary" id="btn-anki-timer">${icon('play', 11)} Start</button>
+              </div>
             </div>
-            <div class="row" style="gap:6px;">
-              <button class="btn btn-xs" id="btn-anki-sync">${icon('refresh', 12)} Sync</button>
-              <button class="btn btn-xs btn-primary" id="btn-anki-timer">${icon('play', 11)} Start</button>
-            </div>
-          </div>
 
-          ${anki.decks.length ? `
-            <div class="entry-list" style="margin-bottom:10px;">
-              ${anki.decks.slice(0, 8).map((d) => `
-                <div class="entry-row" style="padding:6px 10px;">
-                  <span class="small">${d.group ? `<span class="xs soft">${esc(d.group)} / </span>` : ''}${esc(d.name)}</span>
-                  <div class="row" style="gap:6px;flex-wrap:nowrap;">
-                    <span class="xs mono muted"><span class="anki-dot blue"></span>${d.newCards} · <span class="anki-dot red"></span>${d.learnCards || 0} · <span class="anki-dot green"></span>${d.reviewCards}</span>
-                    <button class="btn btn-xs btn-ghost" data-anki-hide="${esc(d.fullName || d.name)}" title="Stapel aus Zählung ausblenden">${icon('x', 11)}</button>
+            ${anki.decks.length ? `
+              <div class="entry-list" style="margin-bottom:10px;">
+                ${anki.decks.slice(0, 8).map((d) => `
+                  <div class="entry-row" style="padding:6px 10px;">
+                    <span class="small">${d.group ? `<span class="xs soft">${esc(d.group)} / </span>` : ''}${esc(d.name)}</span>
+                    <div class="row" style="gap:6px;flex-wrap:nowrap;">
+                      <span class="xs mono muted"><span class="anki-dot blue"></span>${d.newCards} · <span class="anki-dot red"></span>${d.learnCards || 0} · <span class="anki-dot green"></span>${d.reviewCards}</span>
+                      <button class="btn btn-xs btn-ghost" data-anki-hide="${esc(d.fullName || d.name)}" title="Stapel aus Zählung ausblenden">${icon('x', 11)}</button>
+                    </div>
                   </div>
-                </div>
-              `).join('')}
-            </div>
-          ` : ''}
+                `).join('')}
+              </div>
+            ` : ''}
 
-          ${anki.hasLegacyDecks ? `
-            <div class="xs soft" style="margin-bottom:8px;">
-              Tipp: Bei geöffnetem Anki einmal <strong>Sync</strong> klicken, um Übergruppen automatisch zu trennen — oder Übergruppe per <strong>×</strong> ausblenden.
-            </div>
-          ` : ''}
+            ${anki.hasLegacyDecks ? `
+              <div class="xs soft" style="margin-bottom:8px;">
+                Tipp: Bei geöffnetem Anki einmal <strong>Sync</strong> klicken, um Übergruppen automatisch zu trennen — oder Übergruppe per <strong>×</strong> ausblenden.
+              </div>
+            ` : ''}
 
-          ${(anki.excludedDecks || []).length ? `
-            <div class="chip-row" style="margin-bottom:10px;">
-              ${anki.excludedDecks.map((name) => `
-                <button class="chip" data-anki-unhide="${esc(name)}" title="Wieder einblenden">Ausgeblendet: ${esc(name)} ↺</button>
-              `).join('')}
-            </div>
-          ` : ''}
+            ${(anki.excludedDecks || []).length ? `
+              <div class="chip-row" style="margin-bottom:10px;">
+                ${anki.excludedDecks.map((name) => `
+                  <button class="chip" data-anki-unhide="${esc(name)}" title="Wieder einblenden">Ausgeblendet: ${esc(name)} ↺</button>
+                `).join('')}
+              </div>
+            ` : ''}
 
-          <div class="row" style="align-items:flex-end;">
-            <div class="field" style="flex:1;min-width:68px;">
-              <label><span class="anki-dot blue"></span>Neu (${anki.weights.secNew}s)</label>
-              <input type="number" min="0" class="input mono" id="anki-m-new" value="${anki.totalNew}" />
+            <div class="row" style="align-items:flex-end;">
+              <div class="field" style="flex:1;min-width:68px;">
+                <label><span class="anki-dot blue"></span>Neu (${anki.weights.secNew}s)</label>
+                <input type="number" min="0" class="input mono" id="anki-m-new" value="${anki.totalNew}" />
+              </div>
+              <div class="field" style="flex:1;min-width:68px;">
+                <label><span class="anki-dot red"></span>Rot (${anki.weights.secLearn}s)</label>
+                <input type="number" min="0" class="input mono" id="anki-m-learn" value="${anki.totalLearn}" />
+              </div>
+              <div class="field" style="flex:1;min-width:68px;">
+                <label><span class="anki-dot green"></span>Grün (${anki.weights.secReview}s)</label>
+                <input type="number" min="0" class="input mono" id="anki-m-rev" value="${anki.totalReview}" />
+              </div>
+              <button class="btn btn-sm" id="btn-anki-manual-save">OK</button>
             </div>
-            <div class="field" style="flex:1;min-width:68px;">
-              <label><span class="anki-dot red"></span>Rot (${anki.weights.secLearn}s)</label>
-              <input type="number" min="0" class="input mono" id="anki-m-learn" value="${anki.totalLearn}" />
-            </div>
-            <div class="field" style="flex:1;min-width:68px;">
-              <label><span class="anki-dot green"></span>Grün (${anki.weights.secReview}s)</label>
-              <input type="number" min="0" class="input mono" id="anki-m-rev" value="${anki.totalReview}" />
-            </div>
-            <button class="btn btn-sm" id="btn-anki-manual-save">OK</button>
           </div>
         </section>
       </div>
@@ -499,9 +508,9 @@ export function renderTodayView(root, ctx) {
         </section>
       </div>
 
-      <!-- 4. Neuer Fokus-Eintrag -->
-      <section class="card ${ui.d_entry ? '' : 'collapsed'}" data-collapse="d_entry">
-        <button class="collapsible-header" data-toggle="d_entry">
+      <!-- 4. Neuer Fokus-Eintrag (standardmäßig zugeklappt) -->
+      <section class="card ${ui.d_entry_open ? '' : 'collapsed'}" data-collapse="d_entry_open">
+        <button class="collapsible-header" data-toggle="d_entry_open">
           <h2 class="card-title">${icon('plus', 15)} Neuer Zeit-Eintrag</h2>
           <span class="chevron">${icon('chevron', 16)}</span>
         </button>
@@ -880,6 +889,18 @@ export function renderTodayView(root, ctx) {
   });
   root.querySelector('#btn-anki-sync')?.addEventListener('click', triggerAnkiSync);
   root.querySelector('#btn-anki-row-sync')?.addEventListener('click', triggerAnkiSync);
+  root.querySelector('#btn-anki-mobile-hint')?.addEventListener('click', () => {
+    toast('Sync am Laptop mit geöffnetem Anki — am Handy wird der Stand per Cloud-Sync übernommen (oder unter Anki-Details manuell eintragen).');
+  });
+  root.querySelector('#btn-anki-open-details')?.addEventListener('click', () => {
+    store.state.ui.d_anki_card = true;
+    store.save({ skipSync: true, silent: true });
+    const card = root.querySelector('#anki-detail-card');
+    if (card) {
+      card.classList.remove('collapsed');
+      card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+  });
   root.querySelector('#anki-row-toggle')?.addEventListener('click', () => {
     const nextDone = !ankiDoneToday;
     store.setAnkiDoneDay(today, nextDone);

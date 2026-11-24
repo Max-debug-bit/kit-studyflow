@@ -163,15 +163,13 @@ export function createDefaultState() {
       d_hero: true,
       d_live: true,
       d_plan: true,
-      d_anki: true,
-      d_entry: true,
-      dgc: true,
+      d_anki_card: false,
+      d_entry_open: false,
       d_caf: false,
       d_wake: false,
       d_ent: false,
       tdt: false
     },
-    dg: { n: 0, max: 0, at: 0, tmax: 0 },
 
     // KIT StudyFlow extensions (schemaVersion 2)
     schemaVersion: 2,
@@ -192,8 +190,6 @@ export function createDefaultState() {
     checklist: [],         // { id, d, timeLabel, title, kind: 'l'|'a'|'p', estMin, moduleId?, backlogId?, done, source }
     dayNotes: {},          // { 'YYYY-MM-DD': 'Uni 09:45–15:30' }
     reminders: [],         // { id, text, date?, done }
-    planBlocks: [],        // Legacy / optional calendar blocks
-    tasks: [],             // Assignments / Deadlines
     taskCatalog: DEFAULT_TASK_CATALOG.map((x) => ({ ...x, updatedAt: 0 })), // Editable & auto-calibrating task blueprints for AI & user
     taskCatalogSeeded: true,
     anki: {
@@ -210,7 +206,6 @@ export function createDefaultState() {
       manualLearn: 0,       // Rot
       manualReview: 0,      // Grün
       manualDue: 0,         // legacy fallback
-      todayMinutes: 0,
       decks: [],    // { name, fullName, group, due, newCards, learnCards, reviewCards }
       excludedDecks: [], // deck names/fullNames manually hidden from count & time
       excludedMeta: {}   // { [deckKey]: { excluded: boolean, ts: number } } for conflict-safe 2-way merge
@@ -383,7 +378,6 @@ class Store {
       ...def,
       ...data,
       ui: { ...def.ui, ...(data.ui || {}) },
-      dg: { ...def.dg, ...(data.dg || {}) },
       anki: { ...def.anki, ...(data.anki || {}) },
       planningPrefs: { ...def.planningPrefs, ...(data.planningPrefs || {}) },
       ai: { ...def.ai, ...(data.ai || {}) },
@@ -404,8 +398,6 @@ class Store {
       customEvents: Array.isArray(data.customEvents) ? data.customEvents : [],
       checklist: Array.isArray(data.checklist) ? data.checklist : [],
       reminders: Array.isArray(data.reminders) ? data.reminders : [],
-      planBlocks: Array.isArray(data.planBlocks) ? data.planBlocks : [],
-      tasks: Array.isArray(data.tasks) ? data.tasks : [],
       taskCatalog: Array.isArray(data.taskCatalog) && data.taskCatalog.length > 0
         ? data.taskCatalog
         : data.taskCatalogSeeded
@@ -415,6 +407,11 @@ class Store {
               .map((x) => ({ ...x, updatedAt: 0 })),
       taskCatalogSeeded: true
     };
+    // Tolerantly strip removed legacy fields if present in older backups or localStorage
+    delete merged.dg;
+    delete merged.planBlocks;
+    delete merged.tasks;
+    if (merged.anki) delete merged.anki.todayMinutes;
     return this._migrateState(merged, Number(data?.schemaVersion || 1));
   }
 
@@ -986,8 +983,6 @@ class Store {
 
     if (st.planBlockId) {
       const nowTs = Date.now();
-      const blk = this.state.planBlocks.find((b) => b.id === st.planBlockId);
-      if (blk) { blk.done = true; blk.updatedAt = nowTs; }
       const chk = this.state.checklist.find((c) => c.id === st.planBlockId);
       if (chk) { chk.done = true; chk.updatedAt = nowTs; }
       if (this._reconcileHook) this._reconcileHook({ todayStr: toDateStr() });
@@ -2003,7 +1998,7 @@ class Store {
     if (!parsed || typeof parsed !== 'object') {
       throw new Error('Ungültiges JSON-Backup.');
     }
-    if (!Array.isArray(parsed.e) && !parsed.w && !parsed.cf && !parsed.planBlocks) {
+    if (!Array.isArray(parsed.e) && !parsed.w && !parsed.cf && !Array.isArray(parsed.checklist) && !Array.isArray(parsed.planBlocks)) {
       throw new Error('Datei enthält keine erkennbaren Fokus-Tracker- oder Planer-Daten.');
     }
 
@@ -2102,7 +2097,7 @@ class Store {
           }
         }
       };
-      ['planBlocks', 'tasks', 'checklist', 'backlog', 'customEvents', 'reminders', 'taskCatalog'].forEach(mergeListById);
+      ['checklist', 'backlog', 'customEvents', 'reminders', 'taskCatalog'].forEach(mergeListById);
 
       if (parsed.icsRaw && !this.state.icsRaw) {
         this.state.icsRaw = parsed.icsRaw;

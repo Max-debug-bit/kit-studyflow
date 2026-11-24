@@ -107,14 +107,15 @@ export function buildPlanningContext(weekOffset = 0) {
     createsAnki: Boolean(m.createsAnki),
     triggersHomework: Boolean(m.triggersHomework),
     homeworkMode: m.triggersHomework ? (m.homeworkMode || 'understanding') : null,
-    ankiDeck: m.ankiDeck || '',
-    notes: m.notes || ''
+    ...(m.notes ? { notes: m.notes } : {})
   }));
 
-  // Collect all uni events for the 7 days (WebCal + custom events + per-date overrides!)
+  // Collect all uni events & planned rest days for the 7 days (WebCal + custom events + per-date overrides!)
   const weekUni = [];
+  const geplanteRuhetageDieseWoche = [];
   for (let i = 0; i < 7; i++) {
     const d = addDays(mondayStr, i);
+    if (store.isRestDay(d)) geplanteRuhetageDieseWoche.push(d);
     const wd = WEEKDAYS_DE[parseDateStr(d).getDay()];
     for (const l of getDayLectures(d, now)) {
       if (l.cancelled) continue;
@@ -167,14 +168,11 @@ export function buildPlanningContext(weekOffset = 0) {
       ...(c.backlogId ? { backlogId: c.backlogId } : {})
     }));
 
-  const openTasks = store.state.tasks
-    .filter((t) => !t.done)
-    .map((t) => ({ title: t.title, due: t.due, estMinutes: t.estMinutes }));
-
   const calibration = store.getCalibrationSummary();
   const load7d = store.getLoadSummary7d(todayStr);
   const subjectBalance = store.getSubjectBalance();
   const patterns = store.getPersonalPatterns(todayStr);
+  const heuteAufgewachtUm = store.state.w?.[todayStr] || '';
 
   return {
     heute: todayStr,
@@ -184,10 +182,12 @@ export function buildPlanningContext(weekOffset = 0) {
     studienProfil: store.state.ai.studyNotes,
     weicheRhythmusOrientierung: store.state.ai.rhythmNotes || '',
     tagesRhythmus: {
+      heuteAufgewachtUm,
       aufwachzeitFreieTage: defaultWakeFreeDay,
       fruehesterLernstartFreieTage: freeDayEarliestStart,
       standardEinschlafzeit: store.state.sl || '23:00',
-      sonntagFreiAusserAnki: Boolean(prefs.sundayFree !== false)
+      sonntagFreiAusserAnki: Boolean(prefs.sundayFree !== false),
+      geplanteRuhetageDieseWoche
     },
     fokusStatistik: {
       tageszielMindestMin: store.state.goal,
@@ -222,19 +222,13 @@ export function buildPlanningContext(weekOffset = 0) {
       }))
     },
     ankiStatus: {
-      quelle: anki.source,
       letzterSyncHeute: ankiSyncedToday,
       ankiFuerHeuteAbgehakt: ankiDoneToday,
       heuteBereitsGeloeggtMin: todayBreak.a,
-      neueKartenBlau: anki.totalNew,
-      lernKartenRot: anki.totalLearn,
-      faelligeKartenGruen: anki.totalReview,
       faelligeKartenGesamt: anki.totalDue,
-      gewichteSekunden: anki.weights,
       alleFaelligenKartenMin: anki.estMinutes,
       heuteNochOffenBerechnetMin: todayAnkiRemainingMin,
       taeglicherZeitpufferFolgetageMin: minDailyAnki,
-      aktiveDecks: (anki.decks || []).filter((d) => (d.due || 0) > 0),
       planungsRegel: 'Tägliche Anki-Reviews werden NICHT als normale Todo-Punkte in items geplant. Wichtig: Der Student macht NICHT zwingend jeden Tag ALLE fälligen Karten! Wenn ankiFuerHeuteAbgehakt === true, sind heute 0 Min. Anki mehr offen (egal wie viele Karten noch in Anki liegen). Sonst ein realistisches Tagespensum im Budget reservieren (orientiert an taeglicherZeitpufferFolgetageMin bzw. alleFaelligenKartenMin wenn kleiner).'
     },
     modulRegeln: moduleRules,
@@ -242,20 +236,14 @@ export function buildPlanningContext(weekOffset = 0) {
       catalogId: c.id,
       fach: c.subject,
       titel: c.title,
-      taetigkeit: c.act,
       aktiveDauerMin: c.effectiveMin,
-      startWertMin: c.defaultMin,
-      echteSessions: c.sampleCount,
-      automatischKalibriert: c.calibrated,
-      kalibrierungsModus: c.calibrated ? 'P75 (oberes Ende gegen Zeitdruck)' : 'Startwert',
-      notiz: c.notes
+      ...(c.notes ? { notiz: c.notes } : {})
     })),
     uniTermineDieseWoche: weekUni,
     offenerRueckstand,
     eingeplanterRueckstand,
     aktuelleCheckliste: currentChecklist,
-    vorgemerkteTermine: (store.state.reminders || []).filter((r) => !r.done).map((r) => r.text),
-    offeneAbgaben: openTasks
+    vorgemerkteTermine: (store.state.reminders || []).filter((r) => !r.done).map((r) => r.text)
   };
 }
 
@@ -265,28 +253,29 @@ Antworte auf Deutsch, klar, ohne Emojis und ohne unnötige Floskeln.
 
 Halte dich strikt an diese 7 Regeln und nutze jedes Feld aus dem JSON-Kontext gezielt:
 
-1. ZEIT & REALITÄT (aktuelleUhrzeit & tagesRhythmus):
+1. ZEIT, REALITÄT & RUHETAGE (aktuelleUhrzeit & tagesRhythmus):
    - Plane für "heute" KEINE Zeitfenster, die vor "aktuelleUhrzeit" liegen.
-   - An Tagen ohne frühen Uni-Termin startet das Lernen frühestens ab "tagesRhythmus.fruehesterLernstartFreieTage" (~45 Min. nach "aufwachzeitFreieTage").
+   - Wenn "tagesRhythmus.heuteAufgewachtUm" gefüllt ist, berücksichtige den echten heutigen Tagesstart (bei spätem Aufwachen entsprechend kompakter planen). An anderen Tagen ohne frühen Uni-Termin startet das Lernen frühestens ab "tagesRhythmus.fruehesterLernstartFreieTage" (~45 Min. nach "aufwachzeitFreieTage").
    - Plane realistischen Feierabend deutlich vor "standardEinschlafzeit"; nach sehr langen Uni-Tagen (z. B. bis 18:00/19:00) abends möglichst frei lassen.
-   - Wenn "sonntagFreiAusserAnki" true ist, bleibt Sonntag außer Anki-Reviews frei (maximal Notfall-Puffer).
+   - Halte alle Tage in "tagesRhythmus.geplanteRuhetageDieseWoche" (inkl. Sonntag, falls "sonntagFreiAusserAnki" true ist) außer Anki-Reviews frei (maximal leichter Notfall-Puffer).
 
-2. ENERGIE-MODUS & MINDESTZIEL (tageszielMindestMin & energieModus):
-   - "tageszielMindestMin" ist ein tägliches MINDESTZIEL (Streak), KEIN Tagesmaximum! Ein 150–180-Min.-Video ist völlig normal und erwünscht.
+2. ENERGIE-MODUS, BELASTUNGS-SCHUTZ & WEICHER RHYTHMUS (fokusStatistik, energieModus & weicheRhythmusOrientierung):
+   - "tageszielMindestMin" ist ein tägliches MINDESTZIEL (Streak), KEIN Tagesmaximum! Ein 110–150-Min.-Video ist völlig normal und erwünscht.
    - Passe das Tagespensum an Uni-Last, "heuteSchonGelerntMin" und "energieModus" an:
      * "reset": leicht (~1,5–3 h), niedrige Einstiegshürde, passiv vor aktiv, viel Puffer.
      * "normal": stabiler KIT-Rhythmus (~2,5–4,5 h an freien Tagen, ~1–2,5 h an vollen Uni-Tagen).
      * "fokus": hohes Pensum (~4–6 h an freien Tagen, ~2–3,5 h an Uni-Tagen).
+   - ÜBERLASTUNGS-REGEL: Wenn "fokusStatistik.belastung7TageStunden" >= 34 h ODER "fokusStatistik.tageOhnePauseInFolge" >= 7 ist, reduziere die geplante Tageslast spürbar, baue bewusste Puffer ein und weise in deiner Erklärung kurz darauf hin, dass ein leichter Tag / Ruhetag sinnvoll ist.
+   - Falls "weicheRhythmusOrientierung" gefüllt ist, nutze sie als lockere, flexible Leitlinie für Wochentag-Vorlieben (niemals starr, wenn aktuelle Termine, Belastung oder Energie dagegen sprechen).
 
 3. ANKI-ZEITBUDGET (DYNAMISCH ÜBER TÄGLICHEN ANKI-SYNC – SEHR WICHTIG!):
    - Plane KEINE eigenen „Anki-Reviews“-Checklisten-Punkte ("kind": "a") in "items"! Die App zeigt Anki dynamisch oben auf „Heute“ mit eigenem Abhaken an.
    - Wichtig: Der Student macht NICHT jeden Tag zwingend alle fälligen Anki-Karten (bei großem Rückstau macht er oft nur ein realistisches Tagespensum und hakt Anki für heute ab).
    - Reserviere die Anki-Zeit dennoch ZWINGEND im täglichen Zeitbudget, damit kein Tag überplant wird:
-     * HEUTE: Wenn "ankiStatus.ankiFuerHeuteAbgehakt" true ist → 0 Min. mehr für heute reservieren (auch wenn noch Karten in Anki liegen!). Wenn false → realistisches Budget reservieren (orientiert an "taeglicherZeitpufferFolgetageMin" bzw. "alleFaelligenKartenMin", falls kleiner).
+     * HEUTE: Wenn "ankiStatus.ankiFuerHeuteAbgehakt" true ist → 0 Min. mehr für heute reservieren (auch wenn noch Karten in Anki liegen!). Wenn false → realistisches Budget reservieren (orientiert an "heuteNochOffenBerechnetMin" bzw. "taeglicherZeitpufferFolgetageMin" / "alleFaelligenKartenMin", falls kleiner).
      * FOLGETAGE (Di–So): Ziehe pauschal "ankiStatus.taeglicherZeitpufferFolgetageMin" (z. B. 30 Min.) pro Tag als Zeitpuffer vom Tagesbudget ab.
      * Nenne in deiner kurzen Erklärung vor dem JSON explizit, wie viel Anki-Zeit du heute und an den Folgetagen im Budget reserviert hast!
    - Hinweis: Das *Erstellen* neuer Anki-Karten nach einer Vorlesung (z. B. „WK: VL nacharbeiten + Ankis erstellen“) bleibt ein normaler Lern-Punkt ("kind": "l") – nur das tägliche *Durchgehen* der fälligen Reviews läuft dynamisch über den Anki-Sync.
-   - Falls "weicheRhythmusOrientierung" gefüllt ist, nutze sie als lockere, flexible Leitlinie (niemals starr, wenn aktuelle Termine oder Energie dagegen sprechen).
 
 4. VORLESUNGEN, ÜBUNGEN, VIDEOS & HAUSAUFGABEN (uniTermineDieseWoche & modulRegeln):
    - Richte dich IMMER exakt nach den Werten "liveReviewMinutes", "videoStudyMinutes" und "createsAnki" in "uniTermineDieseWoche" / "modulRegeln" — auch bei Übungen!
@@ -296,7 +285,7 @@ Halte dich strikt an diese 7 Regeln und nutze jedes Feld aus dem JSON-Kontext ge
    - Wenn "triggersHomework: true": Nach dieser Übung fällt eine neue Hausaufgabe an. Bei "homeworkMode: understanding" gilt: reine Verständnis-Bearbeitung OHNE harte Abgabe-Panik (andere geben ab) – entspannt in den nächsten Tagen als eigenen Checklisten-Punkt einplanen.
 
 5. AUFGABEN-KATALOG & SELBST-KALIBRIERUNG (aufgabenKatalog):
-   - Wähle nach Möglichkeit direkt passende Bausteine aus "aufgabenKatalog" aus! Nutze deren "aktiveDauerMin" als realistische "estMin" (ab 2 echten Sessions bereits automatisch an die echten Zeiten des Studenten kalibriert!) und gib die exakte "catalogId" im Item zurück.
+   - Wähle nach Möglichkeit direkt passende Bausteine aus "aufgabenKatalog" aus! Nutze deren "aktiveDauerMin" als realistische "estMin" (bereits am oberen Ende P75 kalibriert) und gib die exakte "catalogId" im Item zurück.
    - Du darfst bestehende Katalog-Bausteine NIEMALS löschen oder umbenennen.
    - Falls dir für eine wiederkehrende Aufgabenart ein passender Baustein im Katalog fehlt (z. B. Labor-Vorbereitung oder CAD-Aufgabe), kannst du ihn optional in "newCatalogItems" vorschlagen (die App fügt nur neue Einträge hinzu).
 
@@ -306,7 +295,9 @@ Halte dich strikt an diese 7 Regeln und nutze jedes Feld aus dem JSON-Kontext ge
    - Punkte in "eingeplanterRueckstand" NICHT doppelt einplanen, außer du ersetzt ihren bisherigen Tag über "replaceDates".
    - Nutze "lernHistorieFuerKI.letzteLernSessions" (was konkret zuletzt gelernt wurde), "echteP75ZeitenProFach" (oberes Ende gegen Zeitdruck), "fokusStatistik.kapazitaetNachUniLast" (echte Kapazität an freien vs. vollen Uni-Tagen) und "fachBalance" (vernachlässigte Fächer gezielt ausgleichen), um Blocklängen und Fach-Prioritäten realistisch anzusetzen.
 
-7. FORMAT & ZEIT-HINWEISE:
+7. BESTEHENDE CHECKLISTE, FORMAT & ZEIT-HINWEISE (aktuelleCheckliste):
+   - Prüfe "aktuelleCheckliste" vor dem Planen: Bereits erledigte Punkte ("done": true) bleiben IMMER erhalten und werden nie erneut geplant.
+   - Für Tage, die du komplett neu strukturierst, trage das Datum in "replaceDates" ein (die App ersetzt dort nur offene Punkte). Für Tage NICHT in "replaceDates" behalte bestehende offene Punkte bei und plane sie nicht doppelt ein!
    - Nutze "timeLabel" nur dort, wo Lücken zwischen Uni-Terminen oder Startzeiten sinnvoll sind (z. B. "10:45", "Ab 15:30", "11:15–14:00"), sonst "" lassen.
    - Halte "dayNotes" knapp anhand der echten Zeiten aus "uniTermineDieseWoche" (z. B. "Uni 09:45–15:30" oder "Start ~10:45 · MKL 14:00").
    - Wenn du einen Plan vorschlägst, gib nach einer kurzen Erklärung exakt diesen JSON-Block aus:
@@ -653,7 +644,7 @@ Antworte AUSSCHLIESSLICH mit einem validen JSON-Codeblock in exakt diesem Format
 }
 \`\`\`
 Regeln:
-- "overrideType" darf nur "exercise" (Übung, keine Nacharbeit), "lecture" (Vorlesung, mit Nacharbeit) oder "cancelled" (fällt aus/Feiertag) sein.
+- "overrideType" darf nur "exercise" (Übung; Nacharbeit richtet sich nach Modul-Regel), "lecture" (Vorlesung, mit Nacharbeit) oder "cancelled" (fällt aus/Feiertag) sein.
 - "matchModule" ist das kurze Fach-Stichwort zum Zuordnen im WebCal (z. B. "MKL", "HM", "WK", "TM", "FT").
 - Achte genau auf Jahreswechsel (passend zum aktuellen Datum ${toDateStr()}).
 - "customEvents": einmalige Zusatztermine wie Workshops mit konkretem Datum, Start- und Endzeit.`;
