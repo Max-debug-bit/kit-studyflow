@@ -44,8 +44,9 @@ try {
       if ([string]::IsNullOrWhiteSpace($cleanPath)) { $cleanPath = "index.html" }
       $cleanPath = [System.Uri]::UnescapeDataString($cleanPath).Replace('/', '\')
       $fullPath = [System.IO.Path]::GetFullPath((Join-Path $root $cleanPath))
+      $rootPrefix = $root.TrimEnd('\') + '\'
 
-      if (-not $fullPath.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path $fullPath -PathType Leaf)) {
+      if (-not $fullPath.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path $fullPath -PathType Leaf)) {
         $body = [System.Text.Encoding]::UTF8.GetBytes("404 Not Found")
         $head = "HTTP/1.1 404 Not Found`r`nContent-Type: text/plain; charset=utf-8`r`nContent-Length: $($body.Length)`r`nConnection: close`r`n`r`n"
         $headBytes = [System.Text.Encoding]::ASCII.GetBytes($head)

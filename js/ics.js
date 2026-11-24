@@ -174,8 +174,12 @@ export function classifyKitSummary(rawSummary) {
   };
 }
 
+let _cachedIcsText = null;
+let _cachedIcsEvents = null;
+
 export function parseIcsEvents(icsText) {
   if (!icsText || !icsText.includes('BEGIN:VEVENT')) return [];
+  if (icsText === _cachedIcsText && _cachedIcsEvents) return _cachedIcsEvents;
   const lines = unfoldLines(icsText);
   const events = [];
   let cur = null;
@@ -214,6 +218,8 @@ export function parseIcsEvents(icsText) {
     }
   }
 
+  _cachedIcsText = icsText;
+  _cachedIcsEvents = events;
   return events;
 }
 

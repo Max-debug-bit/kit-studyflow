@@ -13,9 +13,54 @@ import {
   pad2,
   fmtDateShort,
   fmtMin,
-  WEEKDAYS_DE
+  WEEKDAYS_DE,
+  isValidIsoDate,
+  isValidTimeStr
 } from './store.js';
 import { expandIcsEventsInRange } from './ics.js';
+
+export function inferMetaFromChecklistItem(item) {
+  const title = item?.title || '';
+  const lower = title.toLowerCase();
+  const kind = item?.kind === 'a' || /\banki\b/.test(lower) ? 'a' : item?.kind === 'p' ? 'p' : 'l';
+
+  let act = '';
+  if (kind === 'a') act = 'anki';
+  else if (/video|vl-video/.test(lower)) act = 'video';
+  else if (/\bha\b|hausaufgabe|übung/.test(lower)) act = 'homework';
+  else if (/nacharbeit|folien|ankis?\s+(für|von|erstellen)/.test(lower)) act = 'review';
+  else if (/klausur|altklausur/.test(lower)) act = 'exam';
+
+  let mod = item?.moduleId || '';
+  if (!mod) {
+    const mods = Object.values(store.state.modules || {});
+    const keywords = [
+      { re: /\bhm\b|höhere math/, match: 'hm' },
+      { re: /\btm\b|mechanik/, match: 'tm' },
+      { re: /\bmkl\b|konstruktion/, match: 'mkl' },
+      { re: /\bwk\b|werkstoff/, match: 'wk' },
+      { re: /\bft\b|fertigung/, match: 'ft' }
+    ];
+    for (const kw of keywords) {
+      if (kw.re.test(lower)) {
+        const preferredType = act === 'homework' ? 'Ü' : 'V';
+        const hit = mods.find((m) => m.shortName.toLowerCase().includes(kw.match) && m.type === preferredType)
+                 || mods.find((m) => m.shortName.toLowerCase().includes(kw.match));
+        if (hit) { mod = hit.id; break; }
+      }
+    }
+  }
+
+  let estMin = item?.estMin || 0;
+  if (!estMin) {
+    if (kind === 'a') estMin = store.state.anki.minDailyAnkiMin || 30;
+    else if (act === 'video') estMin = (mod && store.state.modules[mod]?.videoStudyMinutes) || 110;
+    else if (act === 'review') estMin = (mod && store.state.modules[mod]?.liveReviewMinutes) || 75;
+    else estMin = 60;
+  }
+
+  return { kind, act, mod, estMin };
+}
 
 function extractMinutesFromTitle(title) {
   const mMin = /(\d+)\s*(?:min|minuten|m\.)/i.exec(title || '');
@@ -82,7 +127,7 @@ export function reconcileBacklogStatus({ todayStr = toDateStr(), save = false } 
   return backlog;
 }
 
-export function addBacklogItem({ title, moduleId = '', kind = 'l', estMin = 0 }) {
+export function addBacklogItem({ title, moduleId = '', kind = 'l', estMin = 0, save = true }) {
   const clean = (title || '').trim();
   if (!clean) return null;
   const item = {
@@ -96,7 +141,7 @@ export function addBacklogItem({ title, moduleId = '', kind = 'l', estMin = 0 })
     updatedAt: Date.now()
   };
   store.state.backlog.push(item);
-  store.save();
+  if (save) store.save();
   return item;
 }
 
@@ -198,7 +243,7 @@ export function estimateChecklistItemMinutes(item, calibratedCatalog = null) {
   return extracted > 0 ? extracted : 60;
 }
 
-export function moveChecklistItemToDate(id, targetDateStr) {
+export function moveChecklistItemToDate(id, targetDateStr, { save = true } = {}) {
   const item = store.state.checklist.find((x) => x.id === id);
   if (!item || !targetDateStr || item.d === targetDateStr) return { ok: false };
   const oldDate = item.d;
@@ -210,7 +255,7 @@ export function moveChecklistItemToDate(id, targetDateStr) {
   item.d = targetDateStr;
   item.updatedAt = Date.now();
   reconcileBacklogStatus();
-  store.save();
+  if (save) store.save();
   return { ok: true, item, oldDate, targetDate: targetDateStr, estMin: estimateChecklistItemMinutes(item) };
 }
 
@@ -229,7 +274,8 @@ export function moveChecklistItemToBacklog(id) {
       title: item.title,
       moduleId: item.moduleId || '',
       kind: item.kind || 'l',
-      estMin: estimateChecklistItemMinutes(item)
+      estMin: estimateChecklistItemMinutes(item),
+      save: false
     });
   }
   store.markDeleted(id);
@@ -444,33 +490,36 @@ export function getAutopilotSuggestions(nowDate = new Date()) {
 
     for (const l of lectures) {
       if (l.cancelled || !l.endedToday) continue;
-      if (handled[l.uid]) continue;
 
       const baseLabel = l.shortName.replace(/\s*\([^)]+\)/, '').trim();
 
-      if (l.mode === 'video' && l.effectiveType === 'lecture' && l.videoStudyMinutes > 0) {
+      // Evaluate review/video suggestion independently from homework suggestion so accepting one never swallows the other!
+      if (!handled[l.uid]) {
+        if (l.mode === 'video' && l.videoStudyMinutes > 0) {
+          suggestions.push({
+            uid: l.uid,
+            d: dStr,
+            moduleId: l.moduleId || '',
+            kind: 'l',
+            estMin: l.videoStudyMinutes,
+            reason: `Video-${l.effectiveType === 'exercise' ? 'Übung' : 'Vorlesung'} (${wd}, ${fmtDateShort(dStr)})`,
+            title: `${baseLabel}: ${l.effectiveType === 'exercise' ? 'Übungs' : 'VL'}-Video vom ${wd}, ${fmtDateShort(dStr)} durcharbeiten`
+          });
+        } else if (l.mode === 'live' && (l.liveReviewMinutes > 0 || l.createsAnki)) {
+          suggestions.push({
+            uid: l.uid,
+            d: dStr,
+            moduleId: l.moduleId || '',
+            kind: 'l',
+            estMin: l.liveReviewMinutes || 75,
+            reason: `${l.effectiveType === 'exercise' ? 'Übung' : 'Vorlesung'} (${wd}, ${fmtDateShort(dStr)})`,
+            title: `${baseLabel}: ${l.effectiveType === 'exercise' ? 'Übung' : 'VL'} vom ${wd}, ${fmtDateShort(dStr)} nacharbeiten${l.createsAnki ? ' + Ankis' : ''}`
+          });
+        }
+      }
+      if (l.triggersHomework && !handled[`${l.uid}_hw`]) {
         suggestions.push({
-          uid: l.uid,
-          d: dStr,
-          moduleId: l.moduleId || '',
-          kind: 'l',
-          estMin: l.videoStudyMinutes,
-          reason: `Video-Vorlesung (${wd}, ${fmtDateShort(dStr)})`,
-          title: `${baseLabel}: VL-Video vom ${wd}, ${fmtDateShort(dStr)} durcharbeiten`
-        });
-      } else if (l.mode === 'live' && l.effectiveType === 'lecture' && (l.liveReviewMinutes > 0 || l.createsAnki)) {
-        suggestions.push({
-          uid: l.uid,
-          d: dStr,
-          moduleId: l.moduleId || '',
-          kind: 'l',
-          estMin: l.liveReviewMinutes || 75,
-          reason: `Vorlesung (${wd}, ${fmtDateShort(dStr)})`,
-          title: `${baseLabel}: VL vom ${wd}, ${fmtDateShort(dStr)} nacharbeiten${l.createsAnki ? ' + Ankis' : ''}`
-        });
-      } else if (l.triggersHomework) {
-        suggestions.push({
-          uid: l.uid,
+          uid: `${l.uid}_hw`,
           d: dStr,
           moduleId: l.moduleId || '',
           kind: 'l',
@@ -579,13 +628,14 @@ export function getDayLectures(dStr, nowDate = new Date()) {
     const durationMin = Math.max(15, timeToMin(ev.end) - timeToMin(ev.start));
     const attOverride = store.state.lectureAttendance?.[ev.uid]; // 'attended' | 'skipped' | undefined
     const endedToday = dStr < todayStr || (dStr === todayStr && nowMin >= timeToMin(ev.end));
+    const minAutoDate = addDays(todayStr, -2);
 
     let attended = false;
     if (!cancelled) {
       if (mode === 'live') {
         if (attOverride === 'attended') attended = true;
         else if (attOverride === 'skipped') attended = false;
-        else if (store.state.autoLogLectures && dStr === todayStr && endedToday) attended = true;
+        else if (store.state.autoLogLectures && dStr >= minAutoDate && dStr <= todayStr && endedToday) attended = true;
       } else if (attOverride === 'attended') {
         attended = true;
       }
@@ -596,13 +646,19 @@ export function getDayLectures(dStr, nowDate = new Date()) {
     let videoStudyMinutes = 0;
     let createsAnki = false;
     if (!cancelled) {
-      if (effectiveType === 'exercise' || effectiveType === 'workshop') {
+      if (typeOverride === 'exercise' || effectiveType === 'workshop') {
+        // Explicit per-date override (e.g. MKL VL -> Übung) or Workshop: 0 unless custom event defines review
         liveReviewMinutes = ev.isCustom ? (ev.customLiveReviewMin || 0) : 0;
         videoStudyMinutes = 0;
         createsAnki = false;
+      } else if (effectiveType === 'exercise') {
+        // Regular exercise module (e.g. HM I (Ü)): ALWAYS respect user-configured rule values!
+        liveReviewMinutes = ev.isCustom ? (ev.customLiveReviewMin || 0) : (rule?.liveReviewMinutes ?? 0);
+        videoStudyMinutes = ev.isCustom ? 0 : (rule?.videoStudyMinutes ?? 0);
+        createsAnki = ev.isCustom ? false : Boolean(rule?.createsAnki);
       } else {
         liveReviewMinutes = ev.isCustom ? (ev.customLiveReviewMin || 0) : (rule?.liveReviewMinutes ?? 75);
-        videoStudyMinutes = ev.isCustom ? 0 : (rule?.videoStudyMinutes ?? rule?.studyMinutes ?? 165);
+        videoStudyMinutes = ev.isCustom ? 0 : (rule?.videoStudyMinutes ?? rule?.studyMinutes ?? 110);
         createsAnki = ev.isCustom ? false : Boolean(rule?.createsAnki);
       }
     }
@@ -680,6 +736,17 @@ export function syncDayLecturesToProductive(dStr = toDateStr(), { save = true } 
 
   if (changed && save) store.save();
   return { changed, minutes: totalMin, count: attended.length };
+}
+
+export function syncRecentLecturesToProductive(todayStr = toDateStr(), { save = true } = {}) {
+  let anyChanged = false;
+  for (let offset = 0; offset >= -2; offset--) {
+    const dStr = addDays(todayStr, offset);
+    const res = syncDayLecturesToProductive(dStr, { save: false });
+    if (res.changed) anyChanged = true;
+  }
+  if (anyChanged && save) store.save();
+  return { changed: anyChanged };
 }
 
 export function setLectureAttendance(uid, dStr, status) {
@@ -774,10 +841,12 @@ export function applyParsedChecklist({ items, dayNotes, reminders, replaceDates 
 
   // 2. Validate backlogIds against real store.state.backlog (anti-hallucination guard!)
   const validBacklogIds = new Set((store.state.backlog || []).map((b) => b.id));
+  const calList = store.getCalibratedTaskCatalog(); // Computed once before the loop!
   const nowTs = Date.now();
 
   let addedItems = 0;
   for (const it of (items || [])) {
+    if (!it || !isValidIsoDate(it.d) || !String(it.title || '').trim()) continue;
     const rawBacklogId = String(it.backlogId || '').trim();
     const backlogId = rawBacklogId && validBacklogIds.has(rawBacklogId) ? rawBacklogId : '';
 
@@ -797,7 +866,6 @@ export function applyParsedChecklist({ items, dayNotes, reminders, replaceDates 
       if (alreadyActive) continue;
     }
 
-    const calList = store.getCalibratedTaskCatalog();
     const explicitCat = it.catalogId ? calList.find((c) => c.id === it.catalogId) : null;
     const matchedCat = explicitCat || store.matchCatalogItemForText(it.title || '', '', it.moduleId || '');
     const resolvedCat = matchedCat ? calList.find((c) => c.id === matchedCat.id) : null;
@@ -821,22 +889,28 @@ export function applyParsedChecklist({ items, dayNotes, reminders, replaceDates 
   }
 
   if (dayNotes && typeof dayNotes === 'object') {
-    store.state.dayNotes = { ...(store.state.dayNotes || {}), ...dayNotes };
-    for (const d of Object.keys(dayNotes)) store.touchMapKey('dayNotes', d);
+    if (!store.state.dayNotes) store.state.dayNotes = {};
+    for (const [d, note] of Object.entries(dayNotes)) {
+      if (!isValidIsoDate(d)) continue;
+      store.state.dayNotes[d] = String(note || '').trim();
+      store.touchMapKey('dayNotes', d);
+    }
   }
 
   let addedReminders = 0;
   const existingRem = new Set((store.state.reminders || []).map((r) => r.text.toLowerCase()));
   for (const r of (reminders || [])) {
-    const txt = typeof r === 'string' ? r : r.text;
-    if (txt && !existingRem.has(txt.toLowerCase())) {
+    const txt = (typeof r === 'string' ? r : r?.text || '').trim();
+    const low = txt.toLowerCase();
+    if (txt && !existingRem.has(low)) {
       store.state.reminders.push({
         id: `rem_${nowTs}_${addedReminders}_${Math.random().toString(36).slice(2, 5)}`,
-        text: txt.trim(),
-        date: r.date || '',
+        text: txt,
+        date: (r && typeof r === 'object' && isValidIsoDate(r.date)) ? r.date : '',
         done: false,
         updatedAt: nowTs
       });
+      existingRem.add(low);
       addedReminders++;
     }
   }
@@ -853,10 +927,11 @@ export function applySemesterScanResult(scan) {
   store.pushUndo('Semesterplan angewendet');
 
   let appliedOverrides = 0;
+  const affectedDates = new Set();
   if (!store.state.eventOverrides) store.state.eventOverrides = {};
 
   for (const ov of (scan.overrides || [])) {
-    if (!ov.d || !ov.overrideType) continue;
+    if (!isValidIsoDate(ov?.d) || !['exercise', 'lecture', 'cancelled'].includes(ov?.overrideType)) continue;
     const dayEvents = store.state.icsRaw ? expandIcsEventsInRange(store.state.icsRaw, ov.d, ov.d) : [];
     const needle = String(ov.matchModule || '').toLowerCase();
     const matches = dayEvents.filter((ev) => {
@@ -872,6 +947,7 @@ export function applySemesterScanResult(scan) {
         store.state.lectureAttendance[ev.uid] = 'skipped';
         store.touchMapKey('lectureAttendance', ev.uid);
       }
+      affectedDates.add(ov.d);
       appliedOverrides++;
     }
   }
@@ -881,23 +957,28 @@ export function applySemesterScanResult(scan) {
     (store.state.customEvents || []).map((c) => `${c.title.toLowerCase()}|${c.date}|${c.start}`)
   );
   for (const ev of (scan.customEvents || [])) {
-    if (!ev.title || !ev.date) continue;
-    const sig = `${ev.title.toLowerCase()}|${ev.date}|${ev.start || '14:00'}`;
+    const cleanTitle = String(ev?.title || '').trim();
+    if (!cleanTitle || !isValidIsoDate(ev?.date)) continue;
+    const startStr = isValidTimeStr(ev.start) ? ev.start.trim() : '14:00';
+    const endStr = isValidTimeStr(ev.end) ? ev.end.trim() : '15:30';
+    const sig = `${cleanTitle.toLowerCase()}|${ev.date}|${startStr}`;
     if (existingEvSigs.has(sig)) continue;
     store.state.customEvents.push({
-      id: `cev_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
-      title: ev.title.trim(),
-      shortName: ev.title.trim(),
+      id: `cev_${Date.now()}_${addedEvents}_${Math.random().toString(36).slice(2, 5)}`,
+      title: cleanTitle,
+      shortName: cleanTitle,
       recurrence: 'once',
       weekday: parseDateStr(ev.date).getDay(),
       date: ev.date,
-      start: ev.start || '14:00',
-      end: ev.end || '15:30',
+      start: startStr,
+      end: endStr,
       eventType: ['lecture', 'exercise', 'workshop'].includes(ev.eventType) ? ev.eventType : 'workshop',
       liveReviewMinutes: ev.eventType === 'lecture' ? 75 : 0,
-      location: ev.location || '',
+      location: String(ev.location || '').trim(),
       updatedAt: Date.now()
     });
+    existingEvSigs.add(sig);
+    affectedDates.add(ev.date);
     addedEvents++;
   }
 
@@ -905,16 +986,23 @@ export function applySemesterScanResult(scan) {
   const existingRem = new Set((store.state.reminders || []).map((r) => r.text.toLowerCase()));
   for (const txt of (scan.reminders || [])) {
     const clean = String(txt || '').trim();
-    if (clean && !existingRem.has(clean.toLowerCase())) {
+    const low = clean.toLowerCase();
+    if (clean && !existingRem.has(low)) {
       store.state.reminders.push({
-        id: `rem_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
+        id: `rem_${Date.now()}_${addedReminders}_${Math.random().toString(36).slice(2, 5)}`,
         text: clean,
         date: '',
         done: false,
         updatedAt: Date.now()
       });
+      existingRem.add(low);
       addedReminders++;
     }
+  }
+
+  // Re-sync productive lecture entries for all affected dates (e.g. remove auto-logged minutes for cancelled lectures!)
+  for (const d of affectedDates) {
+    syncDayLecturesToProductive(d, { save: false });
   }
 
   store.save();

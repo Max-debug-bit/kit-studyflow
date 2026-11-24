@@ -1,6 +1,6 @@
 // Tab 3: "KI-Planer" – Minimalist Monochrome Gemini Checklist Chat + Proposal Preview + Gemini-Pro-Bridge
 
-import { store, toDateStr, toTimeStr, addDays, getMondayOfWeek, fmtDateShort, fmtMin } from '../store.js';
+import { store, toDateStr, toTimeStr, addDays, getMondayOfWeek, fmtDateShort, fmtMin, escapeHtml as esc } from '../store.js';
 import {
   sendPlannerMessage,
   runPlanAudit,
@@ -19,6 +19,7 @@ import { icon } from '../icons.js';
 let isSending = false;
 let pendingAutoAudit = false;
 let pendingAutoReview = false;
+let pendingBridgeProposal = null;
 
 export function queuePlanAudit() {
   pendingAutoAudit = true;
@@ -28,12 +29,42 @@ export function queueWeeklyReview() {
   pendingAutoReview = true;
 }
 
-function esc(str) {
-  return String(str ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+function renderProposalCardHtml(proposal, { actionHtml = '' } = {}) {
+  if (!proposal) return '';
+  const notices = [];
+  if (proposal.filteredAnkiCount > 0) {
+    notices.push(`${proposal.filteredAnkiCount} doppelte${proposal.filteredAnkiCount === 1 ? 'r Anki-Review-Punkt' : ' Anki-Review-Punkte'} automatisch ausgefiltert`);
+  }
+  if (proposal.rejectedDateCount > 0) {
+    notices.push(`${proposal.rejectedDateCount} ungültige${proposal.rejectedDateCount === 1 ? 's Datum' : ' Daten'} verworfen`);
+  }
+  return `
+    <div class="proposal-card">
+      <div class="row-between" style="margin-bottom:8px;gap:8px;">
+        <strong class="small">${esc(proposal.summary)}</strong>
+        <div class="row" style="gap:6px;">${actionHtml}</div>
+      </div>
+      ${proposal.replaceDates?.length ? `<div class="xs muted" style="margin-bottom:6px;">Ersetzt offene Punkte an: <strong>${proposal.replaceDates.map(fmtDateShort).join(', ')}</strong></div>` : ''}
+      ${notices.length ? `<div class="xs" style="color:var(--gold);margin-bottom:6px;">${esc(notices.join(' · '))}</div>` : ''}
+      ${(proposal.items || []).length ? `
+        <div class="entry-list">
+          ${proposal.items.map((it) => `
+            <div class="entry-row" style="padding:6px 9px;">
+              <span class="small"><strong class="mono">${fmtDateShort(it.d)}${it.timeLabel ? ` · ${esc(it.timeLabel)}` : ''}</strong> — ${esc(it.title)}</span>
+              <div class="row" style="gap:4px;">
+                ${it.estMin ? `<span class="xs soft mono">~${it.estMin}m</span>` : ''}
+                ${it.backlogId ? '<span class="pill">Rückstand</span>' : ''}
+                <span class="pill ${it.kind === 'a' ? 'anki' : it.kind === 'p' ? 'prod' : 'learn'}">${it.kind === 'a' ? 'Anki' : it.kind === 'p' ? 'Orga' : 'Lernen'}</span>
+              </div>
+            </div>
+          `).join('')}
+        </div>
+      ` : ''}
+      ${proposal.suggestedRhythm ? `<div class="xs muted" style="margin-top:8px;"><strong>Rhythmus-Vorschlag:</strong> ${esc(proposal.suggestedRhythm)}</div>` : ''}
+      ${(proposal.newCatalogItems || []).length ? `<div class="xs muted" style="margin-top:8px;">+ Neue Katalog-Bausteine: ${proposal.newCatalogItems.map((c) => `${esc(c.title)} (~${c.defaultMin}m)`).join(' · ')}</div>` : ''}
+      ${(proposal.reminders || []).length ? `<div class="xs muted" style="margin-top:8px;">Vormerken: ${proposal.reminders.map(esc).join(' · ')}</div>` : ''}
+    </div>
+  `;
 }
 
 export function renderPlannerView(root, { toast, navigate }) {
@@ -117,7 +148,7 @@ export function renderPlannerView(root, { toast, navigate }) {
         </div>
 
         <div class="chat-messages" id="chat-messages">
-          ${chat.length === 0 ? `<div class="msg assistant"><div class="msg-text">Ich kenne deinen KIT-Stundenplan, deine Modul-Regeln (Live vs. Video), deinen Aufgaben-Katalog (mit Auto-Kalibrierung), deinen aktuellen Anki-Stand und deine echten Lernzeiten.\n\nSchreib einfach, was diese Woche ansteht oder wann du privat unterwegs bist – ich erstelle dir direkt eine abhakbare Uni-Checkliste (tägliche Anki-Reviews werden automatisch über deinen Anki-Sync berechnet und im Tagesbudget reserviert).</div></div>` : chat.map((m, idx) => `<div class="msg ${m.role === 'user' ? 'user' : 'assistant'}"><div class="msg-text">${esc(m.text)}</div>${m.modelUsed ? `<div class="xs soft" style="margin-top:6px;">${esc(m.modelUsed)}${m.usedFallback ? ' (Auto-Fallback)' : ''}</div>` : ''}${m.suggestedRhythm ? `<div class="proposal-card"><div class="row-between" style="margin-bottom:6px;"><strong class="xs mono">VORSCHLAG: RHYTHMUS-ORIENTIERUNG</strong>${m.rhythmApplied ? '<span class="pill kit">Übernommen</span>' : `<button class="btn btn-xs btn-primary" data-apply-rhythm="${idx}">${icon('check', 12)} Übernehmen</button>`}</div><div class="small muted">${esc(m.suggestedRhythm)}</div></div>` : ''}${m.proposal ? `<div class="proposal-card"><div class="row-between" style="margin-bottom:8px;"><strong class="small">${esc(m.proposal.summary)}</strong>${m.applied ? '<span class="pill kit">Übernommen</span>' : `<button class="btn btn-xs btn-primary" data-apply-prop="${idx}">${icon('check', 12)} Übernehmen</button>`}</div>${m.proposal.replaceDates?.length ? `<div class="xs muted" style="margin-bottom:6px;">Ersetzt offene Punkte an: ${m.proposal.replaceDates.map(fmtDateShort).join(', ')}</div>` : ''}<div class="entry-list">${(m.proposal.items || []).map((it) => `<div class="entry-row" style="padding:6px 9px;"><span class="small"><strong class="mono">${fmtDateShort(it.d)}${it.timeLabel ? ` · ${esc(it.timeLabel)}` : ''}</strong> — ${esc(it.title)}</span><div class="row" style="gap:4px;">${it.estMin ? `<span class="xs soft mono">~${it.estMin}m</span>` : ''}${it.backlogId ? '<span class="pill">Rückstand</span>' : ''}<span class="pill ${it.kind === 'a' ? 'anki' : it.kind === 'p' ? 'prod' : 'learn'}">${it.kind === 'a' ? 'Anki' : it.kind === 'p' ? 'Orga' : 'Lernen'}</span></div></div>`).join('')}</div>${(m.proposal.newCatalogItems || []).length ? `<div class="xs muted" style="margin-top:8px;">+ Neue Katalog-Bausteine: ${m.proposal.newCatalogItems.map((c) => `${esc(c.title)} (~${c.defaultMin}m)`).join(' · ')}</div>` : ''}${(m.proposal.reminders || []).length ? `<div class="xs muted" style="margin-top:8px;">Vormerken: ${m.proposal.reminders.map(esc).join(' · ')}</div>` : ''}</div>` : ''}</div>`).join('')}
+          ${chat.length === 0 ? `<div class="msg assistant"><div class="msg-text">Ich kenne deinen KIT-Stundenplan, deine Modul-Regeln (Live vs. Video), deinen Aufgaben-Katalog (mit Auto-Kalibrierung), deinen aktuellen Anki-Stand und deine echten Lernzeiten.\n\nSchreib einfach, was diese Woche ansteht oder wann du privat unterwegs bist – ich erstelle dir direkt eine abhakbare Uni-Checkliste (tägliche Anki-Reviews werden automatisch über deinen Anki-Sync berechnet und im Tagesbudget reserviert).</div></div>` : chat.map((m, idx) => `<div class="msg ${m.role === 'user' ? 'user' : 'assistant'}"><div class="msg-text">${esc(m.text)}</div>${m.fallbackBridgeType ? `<div class="row" style="margin-top:8px;"><button class="btn btn-xs btn-primary" data-err-bridge="${idx}">${icon('copy', 12)} Prompt für Gemini Pro kopieren</button></div>` : ''}${m.modelUsed ? `<div class="xs soft" style="margin-top:6px;">${esc(m.modelUsed)}${m.usedFallback ? ' (Auto-Fallback)' : ''}</div>` : ''}${m.suggestedRhythm ? `<div class="proposal-card"><div class="row-between" style="margin-bottom:6px;"><strong class="xs mono">VORSCHLAG: RHYTHMUS-ORIENTIERUNG</strong>${m.rhythmApplied ? '<span class="pill kit">Übernommen</span>' : `<button class="btn btn-xs btn-primary" data-apply-rhythm="${idx}">${icon('check', 12)} Übernehmen</button>`}</div><div class="small muted">${esc(m.suggestedRhythm)}</div></div>` : ''}${m.proposal ? renderProposalCardHtml(m.proposal, { actionHtml: m.applied ? '<span class="pill kit">Übernommen</span>' : `<button class="btn btn-xs btn-primary" data-apply-prop="${idx}">${icon('check', 12)} Übernehmen</button>` }) : ''}</div>`).join('')}
           ${isSending ? '<div class="msg assistant muted"><div class="msg-text">Gemini erstellt deinen Plan...</div></div>' : ''}
         </div>
 
@@ -129,11 +160,11 @@ export function renderPlannerView(root, { toast, navigate }) {
 
       <!-- Gemini-Pro-Bridge -->
       <section class="card">
-        <details>
+        <details id="bridge-details" ${pendingBridgeProposal ? 'open' : ''}>
           <summary class="card-title" style="cursor:pointer;">${icon('copy', 15)} Gemini-Pro-Bridge (Copy/Paste für dein Gemini-Pro-Abo)</summary>
           <div class="stack" style="margin-top:12px;">
             <p class="xs muted" style="margin:0;">
-              Kopiere deinen kompletten Kontext-Prompt in die Gemini-Pro-App (Plan, Audit oder Wochenrückblick) und füge die Antwort hier wieder ein — Checkliste, Rhythmus-Update und neue Katalog-Bausteine werden automatisch erkannt.
+              Kopiere deinen kompletten Kontext-Prompt in die Gemini-Pro-App (Plan, Audit oder Wochenrückblick), füge die Antwort hier ein und prüfe vor dem Übernehmen die Vorschau.
             </p>
             <div class="row">
               <input type="text" id="bridge-wish" class="input" style="flex:1;" placeholder="Dein Wunsch (optional)..." />
@@ -143,8 +174,11 @@ export function renderPlannerView(root, { toast, navigate }) {
             </div>
             <textarea id="bridge-paste" class="input mono" placeholder="Antwort aus Gemini Pro hier einfügen (JSON für Plan / Audit / Rückblick / neue Bausteine oder Text-Checkliste)..."></textarea>
             <div class="row" style="justify-content:flex-end;">
-              <button class="btn btn-primary btn-sm" id="btn-bridge-apply">${icon('check', 13)} Antwort übernehmen</button>
+              <button class="btn btn-primary btn-sm" id="btn-bridge-preview">${icon('check', 13)} Vorschau prüfen</button>
             </div>
+            <div id="bridge-preview">${pendingBridgeProposal ? renderProposalCardHtml(pendingBridgeProposal, {
+              actionHtml: `<button class="btn btn-xs" id="btn-bridge-cancel">Verwerfen</button><button class="btn btn-xs btn-primary" id="btn-bridge-confirm">${icon('check', 12)} Plan übernehmen</button>`
+            }) : ''}</div>
           </div>
         </details>
       </section>
@@ -177,7 +211,13 @@ export function renderPlannerView(root, { toast, navigate }) {
       if (store.state.ai.chat.length > 30) store.state.ai.chat = store.state.ai.chat.slice(-30);
       store.save();
     } catch (err) {
-      store.state.ai.chat.push({ role: 'assistant', text: `Fehler: ${err.message}`, ts: Date.now() });
+      store.state.ai.chat.push({
+        role: 'assistant',
+        text: `Fehler: ${err.message}`,
+        fallbackBridgeType: 'plan',
+        fallbackBridgeWish: clean,
+        ts: Date.now()
+      });
       store.save({ skipSync: true });
       toast(err.message, 'err');
     } finally {
@@ -268,7 +308,12 @@ export function renderPlannerView(root, { toast, navigate }) {
       if (store.state.ai.chat.length > 30) store.state.ai.chat = store.state.ai.chat.slice(-30);
       store.save();
     } catch (err) {
-      store.state.ai.chat.push({ role: 'assistant', text: `Audit-Fehler: ${err.message}`, ts: Date.now() });
+      store.state.ai.chat.push({
+        role: 'assistant',
+        text: `Audit-Fehler: ${err.message}`,
+        fallbackBridgeType: 'audit',
+        ts: Date.now()
+      });
       store.save({ skipSync: true });
       toast(err.message, 'err');
     } finally {
@@ -317,7 +362,12 @@ export function renderPlannerView(root, { toast, navigate }) {
       if (store.state.ai.chat.length > 30) store.state.ai.chat = store.state.ai.chat.slice(-30);
       store.save();
     } catch (err) {
-      store.state.ai.chat.push({ role: 'assistant', text: `Rückblick-Fehler: ${err.message}`, ts: Date.now() });
+      store.state.ai.chat.push({
+        role: 'assistant',
+        text: `Rückblick-Fehler: ${err.message}`,
+        fallbackBridgeType: 'review',
+        ts: Date.now()
+      });
       store.save({ skipSync: true });
       toast(err.message, 'err');
     } finally {
@@ -359,20 +409,74 @@ export function renderPlannerView(root, { toast, navigate }) {
     }
   }
 
-  root.querySelector('#btn-bridge-apply')?.addEventListener('click', () => {
+  // 1-Click fallback from API error directly to Gemini-Pro-Bridge
+  root.querySelectorAll('[data-err-bridge]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const m = store.state.ai.chat[Number(btn.getAttribute('data-err-bridge'))];
+      if (!m) return;
+      const prompt = m.fallbackBridgeType === 'audit'
+        ? buildAuditBridgePrompt(weekOffset)
+        : m.fallbackBridgeType === 'review'
+          ? buildWeeklyReviewBridgePrompt(weekOffset)
+          : buildGeminiProBridgePrompt(m.fallbackBridgeWish || '', weekOffset);
+      try {
+        await navigator.clipboard.writeText(prompt);
+        const det = root.querySelector('#bridge-details');
+        if (det) {
+          det.open = true;
+          det.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
+        toast('Prompt für Gemini Pro kopiert! Antwort einfach unten in die Bridge einfügen.', 'ok');
+      } catch {
+        toast('Kopieren fehlgeschlagen.', 'err');
+      }
+    });
+  });
+
+  const bindBridgePreviewButtons = () => {
+    const previewRoot = root.querySelector('#bridge-preview');
+    if (!previewRoot) return;
+    previewRoot.querySelector('#btn-bridge-cancel')?.addEventListener('click', () => {
+      pendingBridgeProposal = null;
+      previewRoot.innerHTML = '';
+    });
+    previewRoot.querySelector('#btn-bridge-confirm')?.addEventListener('click', () => {
+      if (!pendingBridgeProposal) return;
+      const prop = pendingBridgeProposal;
+      pendingBridgeProposal = null;
+      const res = applyProposalToWeek(prop);
+      const pasteEl = root.querySelector('#bridge-paste');
+      if (pasteEl) pasteEl.value = '';
+      previewRoot.innerHTML = '';
+      const parts = [];
+      if (res.addedItems) parts.push(`${res.addedItems} Punkte`);
+      if (res.addedReminders) parts.push(`${res.addedReminders} Vormerkungen`);
+      if (res.addedCatalog) parts.push(`${res.addedCatalog} neue Katalog-Bausteine`);
+      if (res.appliedRhythm) parts.push('Rhythmus-Orientierung');
+      if (prop.filteredAnkiCount > 0) parts.push(`${prop.filteredAnkiCount} doppelte Anki-Reviews ignoriert`);
+      toast(`Übernommen: ${parts.join(', ') || 'Aktualisiert'}.`, 'ok', { undo: true });
+    });
+  };
+  bindBridgePreviewButtons();
+
+  root.querySelector('#btn-bridge-preview')?.addEventListener('click', () => {
     const raw = root.querySelector('#bridge-paste')?.value || '';
     const proposal = extractProposalFromReply(raw);
     if (!proposal) {
+      pendingBridgeProposal = null;
+      const previewRoot = root.querySelector('#bridge-preview');
+      if (previewRoot) previewRoot.innerHTML = '';
       toast('Kein gültiger Plan, Rückblick oder Baustein erkannt.', 'err');
       return;
     }
-    const res = applyProposalToWeek(proposal);
-    root.querySelector('#bridge-paste').value = '';
-    const parts = [];
-    if (res.addedItems) parts.push(`${res.addedItems} Punkte`);
-    if (res.addedReminders) parts.push(`${res.addedReminders} Vormerkungen`);
-    if (res.addedCatalog) parts.push(`${res.addedCatalog} neue Katalog-Bausteine`);
-    if (res.appliedRhythm) parts.push('Rhythmus-Orientierung');
-    toast(`Übernommen: ${parts.join(', ') || 'Aktualisiert'}.`, 'ok', { undo: true });
+    pendingBridgeProposal = proposal;
+    const previewRoot = root.querySelector('#bridge-preview');
+    if (previewRoot) {
+      previewRoot.innerHTML = renderProposalCardHtml(proposal, {
+        actionHtml: `<button class="btn btn-xs" id="btn-bridge-cancel">Verwerfen</button><button class="btn btn-xs btn-primary" id="btn-bridge-confirm">${icon('check', 12)} Plan übernehmen</button>`
+      });
+      bindBridgePreviewButtons();
+    }
+    toast('Vorschau erstellt — prüfe die Punkte und klicke auf „Plan übernehmen“.', 'ok');
   });
 }

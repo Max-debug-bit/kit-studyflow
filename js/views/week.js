@@ -8,7 +8,8 @@ import {
   fmtDateShort,
   fmtMin,
   WEEKDAYS_DE,
-  parseDateStr
+  parseDateStr,
+  escapeHtml as esc
 } from '../store.js';
 import {
   reconcileBacklogStatus,
@@ -25,6 +26,7 @@ import {
   updateChecklistItem,
   deleteChecklistItem,
   estimateChecklistItemMinutes,
+  inferMetaFromChecklistItem,
   moveChecklistItemToDate,
   shiftChecklistItemByDays,
   moveChecklistItemToBacklog,
@@ -54,14 +56,6 @@ let weekOffset = 0;
 
 export function getActiveWeekOffset() {
   return weekOffset;
-}
-
-function esc(str) {
-  return String(str ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
 }
 
 export function renderWeekView(root, { toast, navigate, openModal, closeModal, promptLogFromChecklist }) {
@@ -344,7 +338,7 @@ export function renderWeekView(root, { toast, navigate, openModal, closeModal, p
                 </div>
               </div>
               <div class="row" style="gap:5px;flex-wrap:nowrap;">
-                ${cal ? `<button class="btn btn-xs btn-primary" data-cal-apply="${esc(m.id)}" data-cal-act="${esc(cal.taetigkeit)}" data-cal-min="${cal.durchschnittMin}" title="Basierend auf ${cal.anzahl} erfassten Sessions">Ø ${cal.durchschnittMin}m</button>` : ''}
+                ${cal ? `<button class="btn btn-xs btn-primary" data-cal-apply="${esc(m.id)}" data-cal-act="${esc(cal.taetigkeit)}" data-cal-min="${cal.p75Min}" title="Oberes Ende (P75) aus ${cal.anzahl} Sessions · reiner Ø ${cal.echterSchnittMin}m">P75 ${cal.p75Min}m</button>` : ''}
                 <button class="btn btn-xs" data-edit-mod="${esc(m.id)}">Regel</button>
               </div>
             </div>
@@ -358,7 +352,7 @@ export function renderWeekView(root, { toast, navigate, openModal, closeModal, p
         <div class="card-header">
           <div>
             <h2 class="card-title">${icon('list', 15)} Aufgaben-Katalog (${calibratedCatalog.length})</h2>
-            <div class="xs muted" style="margin-top:2px;">Wird an KI-Prompt & API geschickt · ab 2 echten Sessions automatisch kalibriert (KI darf nur hinzufügen, nie löschen)</div>
+            <div class="xs muted" style="margin-top:2px;">Wird an KI-Prompt & API geschickt · ab 2 echten Sessions automatisch am oberen Ende (P75-Puffer) kalibriert (KI darf nur hinzufügen, nie löschen)</div>
           </div>
           <button class="btn btn-xs btn-primary" id="btn-add-catalog">${icon('plus', 12)} Baustein</button>
         </div>
@@ -374,7 +368,7 @@ export function renderWeekView(root, { toast, navigate, openModal, closeModal, p
                 <div class="xs muted mono" style="margin-top:3px;">
                   Start: ${c.defaultMin}m
                   ${c.calibrated
-                    ? ` · <strong style="color:var(--kit);">Auto-Ø (${c.sampleCount}x): ${c.effectiveMin}m</strong>`
+                    ? ` · <strong style="color:var(--kit);" title="75. Perzentil (oberes Ende gegen Zeitdruck) · reiner Ø war ${c.avgRealMin}m">Auto-Puffer (${c.sampleCount}x): ${c.effectiveMin}m</strong>`
                     : c.sampleCount === 1
                       ? ` · 1 Session: ${c.avgRealMin}m (ab 2x auto)`
                       : ` · Aktiv: ${c.effectiveMin}m`}
@@ -401,8 +395,7 @@ export function renderWeekView(root, { toast, navigate, openModal, closeModal, p
   // Semesterplan-Scanner Modal (BOTH Gemini-Pro-Bridge AND Direct API!)
   root.querySelector('#wk-scan-sem')?.addEventListener('click', () => {
     let lastScan = null;
-    const hasApiKey = Boolean(store.state.ai?.apiKey && store.state.ai.apiKey.trim().length > 10);
-    let scanMode = hasApiKey ? 'bridge' : 'bridge'; // Default to reliable Gemini-Pro-Bridge, 1-click toggle to API
+    let scanMode = 'bridge'; // Default to reliable Gemini-Pro-Bridge, 1-click toggle to API
 
     const renderScanPreview = (modalEl, scan) => {
       const previewEl = modalEl.querySelector('#sem-preview');
@@ -415,8 +408,9 @@ export function renderWeekView(root, { toast, navigate, openModal, closeModal, p
           </div>
           <div class="xs muted" style="margin-bottom:6px;">
             ${scan.overrides.length} Tages-Overrides · ${scan.customEvents.length} Zusatztermine · ${scan.reminders.length} Vormerkungen (${esc(scan.modelUsed || '')})
+            ${scan.rejectedCount > 0 ? ` · <span style="color:var(--danger);">${scan.rejectedCount} ungültige Einträge verworfen</span>` : ''}
           </div>
-          <div class="entry-list" style="max-height:220px;overflow-y:auto;">
+          <div class="entry-list" style="max-height:240px;overflow-y:auto;">
             ${scan.overrides.map((o) => `
               <div class="entry-row" style="padding:5px 8px;">
                 <span class="xs mono">${fmtDateShort(o.d)} · ${esc(o.matchModule)} ${o.label ? `(${esc(o.label)})` : ''}</span>
@@ -427,6 +421,12 @@ export function renderWeekView(root, { toast, navigate, openModal, closeModal, p
               <div class="entry-row" style="padding:5px 8px;">
                 <span class="xs mono">${fmtDateShort(e.date)} ${esc(e.start)}–${esc(e.end)} · ${esc(e.title)}</span>
                 <span class="pill kit">Termin</span>
+              </div>
+            `).join('')}
+            ${scan.reminders.map((r) => `
+              <div class="entry-row" style="padding:5px 8px;">
+                <span class="xs">${esc(r)}</span>
+                <span class="pill">Vormerken</span>
               </div>
             `).join('')}
           </div>
@@ -575,7 +575,7 @@ export function renderWeekView(root, { toast, navigate, openModal, closeModal, p
       else { mod.liveReviewMinutes = min; }
       store.touchMapKey('modules', id);
       store.save();
-      toast(`${mod.shortName} auf Ø ${min} min kalibriert.`, 'ok');
+      toast(`${mod.shortName} auf P75 ${min} min kalibriert.`, 'ok');
     });
   });
 
@@ -693,7 +693,20 @@ export function renderWeekView(root, { toast, navigate, openModal, closeModal, p
   });
   root.querySelectorAll('[data-chk-timer]').forEach((btn) => {
     btn.addEventListener('click', () => {
-      store.startTimer({ mode: 'countdown', kind: btn.getAttribute('data-kind') || 'l', durationMin: Number(btn.getAttribute('data-dur')) || 45, planBlockId: btn.getAttribute('data-chk-timer') });
+      const chkId = btn.getAttribute('data-chk-timer');
+      const it = store.state.checklist.find((x) => x.id === chkId);
+      const meta = it ? inferMetaFromChecklistItem(it) : { kind: btn.getAttribute('data-kind') || 'l', mod: '', act: '' };
+      const catId = it?.catalogId || (meta.kind !== 'a' ? (store.matchCatalogItemForText(it?.title || '', meta.act, meta.mod)?.id || '') : '');
+      store.startTimer({
+        mode: 'countdown',
+        kind: btn.getAttribute('data-kind') || meta.kind || 'l',
+        durationMin: Number(btn.getAttribute('data-dur')) || 45,
+        planBlockId: chkId,
+        mod: meta.mod || '',
+        note: it?.title || '',
+        act: meta.act || '',
+        catalogId: catId
+      });
       toast('Timer gestartet.', 'ok');
       navigate('today');
     });
@@ -938,7 +951,7 @@ export function renderWeekView(root, { toast, navigate, openModal, closeModal, p
           catalogId: pickedCatalogId
         };
         if (existing) {
-          if (nextDate !== existing.d) moveChecklistItemToDate(existing.id, nextDate);
+          if (nextDate !== existing.d) moveChecklistItemToDate(existing.id, nextDate, { save: false });
           updateChecklistItem(existing.id, patch);
         } else {
           addChecklistItem(patch);
@@ -1094,8 +1107,8 @@ export function renderWeekView(root, { toast, navigate, openModal, closeModal, p
       </div>
       ${existing && existing.sampleCount > 0 ? `
         <div class="xs muted mono" style="margin-bottom:10px;">
-          Bisher ${existing.sampleCount} echte ${existing.sampleCount === 1 ? 'Session' : 'Sessions'} · Ø ${existing.avgRealMin} min
-          ${existing.calibrated ? ' (aktiv für KI-Planung)' : ' (ab 2 Sessions automatisch aktiv)'}
+          Bisher ${existing.sampleCount} echte ${existing.sampleCount === 1 ? 'Session' : 'Sessions'} · Oberes Ende (P75): <strong>${existing.upperRealMin} min</strong> (Ø ${existing.avgRealMin} min)
+          ${existing.calibrated ? ' — aktiv für KI-Planung' : ' — ab 2 Sessions automatisch aktiv'}
         </div>
       ` : ''}
       <form id="m-cat-form" class="stack">

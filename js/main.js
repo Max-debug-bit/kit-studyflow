@@ -1,9 +1,9 @@
 // Main bootstrap: monochrome icons, keyboard shortcuts (1-5, N, Strg+Z), Undo Toast,
 // Checklist->Log floating bar (#1), Pixel 9a #pair= QR onboarding (#8), auto-lecture sync & PWA SW
 
-import { store, toDateStr, toTimeStr, fmtDateShort, parseDateStr, WEEKDAYS_DE } from './store.js';
+import { store, toDateStr, toTimeStr, fmtDateShort, parseDateStr, WEEKDAYS_DE, escapeHtml } from './store.js';
 import { scheduleAutoSync, flushPendingSync, syncNow, pullFromGist, isGistConfigured, onSyncStatusChange } from './sync.js';
-import { syncDayLecturesToProductive } from './checklist.js';
+import { syncDayLecturesToProductive, syncRecentLecturesToProductive, reconcileBacklogStatus, inferMetaFromChecklistItem } from './checklist.js';
 import { decodePairingCode, isPinProtectedPairingCode } from './qr.js';
 import { icon } from './icons.js';
 import { renderTodayView, cleanupTodayView } from './views/today.js';
@@ -22,7 +22,7 @@ const TAB_TITLES = {
 };
 
 let currentTab = 'today';
-let quickLogTimer = null;
+let deferredRender = false;
 
 const viewRoot = document.getElementById('view-container');
 const mobileTitle = document.getElementById('mobile-page-title');
@@ -58,6 +58,19 @@ function toast(message, type = '', opts = {}) {
   setTimeout(() => el.remove(), opts.undo ? 5500 : 3800);
 }
 
+function isUserActivelyEditing() {
+  if (!modalRoot.classList.contains('hidden')) return true;
+  const active = document.activeElement;
+  return Boolean(active && active.matches && active.matches('input, textarea, select'));
+}
+
+function flushDeferredRenderIfReady() {
+  if (!deferredRender) return;
+  if (isUserActivelyEditing()) return;
+  deferredRender = false;
+  renderCurrentView();
+}
+
 function openModal(html, onBind) {
   modalRoot.innerHTML = `<div class="modal-card">${html}</div>`;
   modalRoot.classList.remove('hidden');
@@ -70,75 +83,31 @@ function openModal(html, onBind) {
 function closeModal() {
   modalRoot.classList.add('hidden');
   modalRoot.innerHTML = '';
+  flushDeferredRenderIfReady();
 }
 
 // ---------- Checklist -> Lernzeit-Brücke (#1, without Timer!) ----------
 
-function inferMetaFromChecklistItem(item) {
-  const title = item.title || '';
-  const lower = title.toLowerCase();
-  const kind = item.kind === 'a' || /\banki\b/.test(lower) ? 'a' : item.kind === 'p' ? 'p' : 'l';
-
-  let act = '';
-  if (kind === 'a') act = 'anki';
-  else if (/video|vl-video/.test(lower)) act = 'video';
-  else if (/\bha\b|hausaufgabe|übung/.test(lower)) act = 'homework';
-  else if (/nacharbeit|folien|ankis?\s+(für|von|erstellen)/.test(lower)) act = 'review';
-  else if (/klausur|altklausur/.test(lower)) act = 'exam';
-
-  let mod = item.moduleId || '';
-  if (!mod) {
-    const mods = Object.values(store.state.modules || {});
-    const keywords = [
-      { re: /\bhm\b|höhere math/, match: 'hm' },
-      { re: /\btm\b|mechanik/, match: 'tm' },
-      { re: /\bmkl\b|konstruktion/, match: 'mkl' },
-      { re: /\bwk\b|werkstoff/, match: 'wk' },
-      { re: /\bft\b|fertigung/, match: 'ft' }
-    ];
-    for (const kw of keywords) {
-      if (kw.re.test(lower)) {
-        const preferredType = act === 'homework' ? 'Ü' : 'V';
-        const hit = mods.find((m) => m.shortName.toLowerCase().includes(kw.match) && m.type === preferredType)
-                 || mods.find((m) => m.shortName.toLowerCase().includes(kw.match));
-        if (hit) { mod = hit.id; break; }
-      }
-    }
-  }
-
-  let estMin = item.estMin || 0;
-  if (!estMin) {
-    if (kind === 'a') estMin = store.state.anki.minDailyAnkiMin || 30;
-    else if (act === 'video') estMin = (mod && store.state.modules[mod]?.videoStudyMinutes) || 150;
-    else if (act === 'review') estMin = (mod && store.state.modules[mod]?.liveReviewMinutes) || 75;
-    else estMin = 60;
-  }
-
-  return { kind, act, mod, estMin };
-}
-
 function promptLogFromChecklist(item) {
   document.getElementById('quick-log-bar')?.remove();
-  clearTimeout(quickLogTimer);
   if (!item || !item.done) return;
 
   const meta = inferMetaFromChecklistItem(item);
   const today = toDateStr();
-  const before = store.getDayBreakdown(today);
+  const isPastItem = Boolean(item.d && item.d < today);
   const kindLabels = { l: 'Lernzeit', a: 'Anki-Lernzeit', p: 'Vorlesung / Produktiv' };
-  const escHtml = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
   // Default to asking real task duration ('add'), with 1-click switch to Focus-Friend daily total ('total').
   // Input ALWAYS starts EMPTY — never blindly assumes the estimated duration!
   let logMode = 'add';
   let activeKind = meta.kind;
   const moduleOpts = Object.values(store.state.modules || {})
-    .map((m) => `<option value="${escHtml(m.id)}" ${m.id === meta.mod ? 'selected' : ''}>${escHtml(m.shortName)}</option>`)
+    .map((m) => `<option value="${escapeHtml(m.id)}" ${m.id === meta.mod ? 'selected' : ''}>${escapeHtml(m.shortName)}</option>`)
     .join('');
   const calibratedCatalog = store.getCalibratedTaskCatalog();
   const autoCatId = item.catalogId || (activeKind !== 'a' ? (store.matchCatalogItemForText(item.title, meta.act, meta.mod)?.id || '') : '');
   const catalogOpts = calibratedCatalog
-    .map((c) => `<option value="${escHtml(c.id)}" ${c.id === autoCatId ? 'selected' : ''}>${escHtml(c.subject)} · ${escHtml(c.title)} (${c.effectiveMin}m)</option>`)
+    .map((c) => `<option value="${escapeHtml(c.id)}" ${c.id === autoCatId ? 'selected' : ''}>${escapeHtml(c.subject)} · ${escapeHtml(c.title)} (${c.effectiveMin}m)</option>`)
     .join('');
 
   openModal(`
@@ -146,7 +115,7 @@ function promptLogFromChecklist(item) {
       <h3 class="card-title">${icon('check', 15)} Wie lange hat das gedauert?</h3>
       <button class="icon-btn" id="qlm-close" type="button">${icon('x', 15)}</button>
     </div>
-    <div class="small" style="font-weight:620;margin-bottom:4px;">${escHtml(item.title)}</div>
+    <div class="small" style="font-weight:620;margin-bottom:4px;">${escapeHtml(item.title)}</div>
     <div class="xs muted" style="margin-bottom:12px;">
       ${item.isAnkiDaily
         ? `Du musst nicht alle Karten schaffen — trage ein, wie viele Minuten Anki du heute gemacht hast${item.remainingCards > 0 ? ` (${item.remainingCards} Karten bleiben einfach für später/morgen)` : ''}.`
@@ -166,6 +135,16 @@ function promptLogFromChecklist(item) {
           <option value="p" ${activeKind === 'p' ? 'selected' : ''}>Vorlesung / Produktiv</option>
         </select>
       </div>
+
+      ${isPastItem ? `
+        <div class="row-between" style="gap:8px;padding:7px 10px;border-radius:var(--radius-xs);background:var(--bg-soft);border:1px solid var(--border);">
+          <div class="row" style="gap:8px;">
+            <label for="qlm-date" class="xs muted">Buchen für Tag:</label>
+            <input type="date" id="qlm-date" class="input mono" style="width:auto;padding:4px 8px;font-size:0.8rem;" value="${today}" max="${today}" />
+          </div>
+          <button type="button" class="btn btn-xs" id="qlm-pick-orig">Auf ${fmtDateShort(item.d)} legen</button>
+        </div>
+      ` : ''}
 
       <div class="field">
         <label id="qlm-min-label">Echte Dauer dieser Aufgabe (Minuten)</label>
@@ -216,7 +195,13 @@ function promptLogFromChecklist(item) {
     const prevEl = modalEl.querySelector('#qlm-preview');
     const kindSel = modalEl.querySelector('#qlm-kind');
     const actSel = modalEl.querySelector('#qlm-act');
+    const dateEl = modalEl.querySelector('#qlm-date');
     let lastLearnAct = meta.act && meta.act !== 'anki' ? meta.act : '';
+
+    const getTargetDate = () => {
+      const v = dateEl?.value || today;
+      return v > today ? today : v;
+    };
 
     const syncActLock = () => {
       activeKind = kindSel.value;
@@ -238,7 +223,9 @@ function promptLogFromChecklist(item) {
     };
 
     const refreshPreview = () => {
-      const curMin = before[activeKind] || 0;
+      // Always read fresh breakdown so background sync / timer expiry never cause stale deltas!
+      const freshBefore = store.getDayBreakdown(getTargetDate());
+      const curMin = freshBefore[activeKind] || 0;
       const val = Math.round(Number(inp.value) || 0);
       if (logMode === 'add') {
         lbl.textContent = 'Echte Dauer dieser Aufgabe (Minuten)';
@@ -251,7 +238,7 @@ function promptLogFromChecklist(item) {
           prevEl.style.color = 'var(--text-soft)';
         }
       } else {
-        lbl.textContent = `Focus-Friend Gesamtstand heute (${kindLabels[activeKind]})`;
+        lbl.textContent = `Focus-Friend Gesamtstand (${fmtDateShort(getTargetDate())} · ${kindLabels[activeKind]})`;
         inp.placeholder = `Aktuell ${curMin} min — neuen Gesamtstand abtippen`;
         if (val > 0) {
           const diff = val - curMin;
@@ -272,6 +259,13 @@ function promptLogFromChecklist(item) {
 
     inp.addEventListener('input', refreshPreview);
     kindSel.addEventListener('change', () => { syncActLock(); refreshPreview(); });
+    dateEl?.addEventListener('change', refreshPreview);
+    modalEl.querySelector('#qlm-pick-orig')?.addEventListener('click', () => {
+      if (dateEl && item.d) {
+        dateEl.value = item.d;
+        refreshPreview();
+      }
+    });
 
     modalEl.querySelectorAll('[data-qlm]').forEach((btn) => {
       btn.addEventListener('click', () => {
@@ -299,7 +293,10 @@ function promptLogFromChecklist(item) {
         inp.focus();
         return;
       }
-      const curMin = before[activeKind] || 0;
+      const targetDate = getTargetDate();
+      // Compute fresh breakdown at submit time!
+      const freshBefore = store.getDayBreakdown(targetDate);
+      const curMin = freshBefore[activeKind] || 0;
       let totalToRecord;
       let sessionMin;
       if (logMode === 'total') {
@@ -312,7 +309,7 @@ function promptLogFromChecklist(item) {
       const finalAct = activeKind === 'a' ? 'anki' : activeKind === 'p' ? '' : actSel.value;
       const chosenCat = modalEl.querySelector('#qlm-cat')?.value || autoCatId || '';
       const res = store.addEntry({
-        d: today,
+        d: targetDate,
         t: toTimeStr(),
         k: activeKind,
         m: totalToRecord,
@@ -450,6 +447,15 @@ function renderBanners() {
   const backupStale = !store.state.lb || (Date.now() - store.state.lb > sevenDaysMs);
   const cloudActive = isGistConfigured() && Boolean(store.secrets.gistId);
 
+  if (store.lastStorageError) {
+    banners.push(`
+      <div class="banner warn" style="border-color:var(--danger);color:var(--danger);">
+        <span><strong>Speicher-Warnung:</strong> ${escapeHtml(store.lastStorageError)}</span>
+        <button class="btn btn-xs btn-primary" id="banner-storage-go">Backup</button>
+      </div>
+    `);
+  }
+
   if (hasData && backupStale && !cloudActive) {
     banners.push(`
       <div class="banner warn">
@@ -461,6 +467,9 @@ function renderBanners() {
 
   bannersRoot.innerHTML = banners.join('');
   document.getElementById('banner-backup-go')?.addEventListener('click', () => {
+    navigate('more', { subtab: 'settings' });
+  });
+  document.getElementById('banner-storage-go')?.addEventListener('click', () => {
     navigate('more', { subtab: 'settings' });
   });
 }
@@ -580,14 +589,36 @@ setInterval(() => {
   }
 }, 1000);
 
-store.subscribe(() => renderCurrentView());
+store.setReconcileHook(reconcileBacklogStatus);
+store.onStorageError((msg, severity) => {
+  renderBanners();
+  toast(msg, severity === 'warn' ? '' : 'err');
+});
+
+store.subscribe((state, meta = {}) => {
+  // Typing & modal protection: defer background-sync re-renders while user is editing an input or modal is open!
+  if (meta?.fromBackgroundSync && isUserActivelyEditing()) {
+    deferredRender = true;
+    updateSyncPills();
+    renderBanners();
+    return;
+  }
+  deferredRender = false;
+  renderCurrentView();
+});
+
+document.addEventListener('focusout', () => {
+  if (!deferredRender) return;
+  setTimeout(flushDeferredRenderIfReady, 120);
+});
+
 store.onSyncTrigger(() => scheduleAutoSync());
 onSyncStatusChange(() => updateSyncPills());
 
 const expiredOnBoot = store.checkExpiredTimer();
 if (expiredOnBoot) toast(expiredOnBoot.message, 'ok');
 
-if (store.state.autoLogLectures) syncDayLecturesToProductive(toDateStr(), { save: true });
+if (store.state.autoLogLectures) syncRecentLecturesToProductive(toDateStr(), { save: true });
 
 setInterval(() => {
   const exp = store.checkExpiredTimer();
@@ -597,7 +628,7 @@ setInterval(() => {
 
 async function backgroundSync({ showToast = false } = {}) {
   if (isGistConfigured() && store.secrets.gistId) {
-    const res = await syncNow();
+    const res = await syncNow({ fromBackgroundSync: true });
     if (showToast && res.ok && (res.updatedState || res.updatedIcs)) {
       toast(res.updatedIcs ? 'KIT-Kalender & Cloud-Daten aktualisiert.' : 'Cloud-Daten synchronisiert.', 'ok');
     } else if (showToast && !res.ok && res.error) {
@@ -605,6 +636,10 @@ async function backgroundSync({ showToast = false } = {}) {
     }
   }
 }
+
+window.addEventListener('online', () => {
+  backgroundSync({ showToast: true });
+});
 
 let swReg = null;
 const hadSwController = Boolean('serviceWorker' in navigator && navigator.serviceWorker.controller);

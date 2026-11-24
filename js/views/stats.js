@@ -8,7 +8,8 @@ import {
   fmtHours,
   fmtDateShort,
   WEEKDAYS_MON,
-  parseDateStr
+  parseDateStr,
+  escapeHtml as esc
 } from '../store.js';
 import {
   renderWakeRatioBarsSVG,
@@ -22,20 +23,12 @@ import { icon } from '../icons.js';
 
 let historyRange = 14;
 
-function esc(str) {
-  return String(str ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
-
 export function renderStatsView(root, { toast } = {}) {
   const now = new Date();
   const today = toDateStr(now);
   const goal = store.state.goal || 120;
   const st = store.getOverallStats();
-  const rec = store.getRecordsAndMilestones(today);
+  const rec = store.getRecordsAndMilestones(today, st);
 
   const wakeRows = Object.keys(store.state.w)
     .filter((d) => d <= today)
@@ -44,11 +37,18 @@ export function renderStatsView(root, { toast } = {}) {
     .map((d) => {
       const sp = store.getAwakeSpan(d, now);
       const b = store.getDayBreakdown(d);
-      const awakeMin = sp ? sp.elapsedMin : 1;
-      const lPct = (b.l / awakeMin) * 100;
-      const aPct = (b.a / awakeMin) * 100;
-      const pPct = (b.p / awakeMin) * 100;
-      return { d, awakeMin, lMin: b.l, aMin: b.a, pMin: b.p, lPct, aPct, pPct, totalPct: lPct + aPct + pPct };
+      const awakeMin = Math.max(1, sp ? sp.elapsedMin : 1);
+      let lPct = Math.min(100, (b.l / awakeMin) * 100);
+      let aPct = Math.min(100, (b.a / awakeMin) * 100);
+      let pPct = Math.min(100, (b.p / awakeMin) * 100);
+      const rawSum = lPct + aPct + pPct;
+      if (rawSum > 100) {
+        const scale = 100 / rawSum;
+        lPct *= scale;
+        aPct *= scale;
+        pPct *= scale;
+      }
+      return { d, awakeMin, lMin: b.l, aMin: b.a, pMin: b.p, lPct, aPct, pPct, totalPct: Math.min(100, rawSum) };
     });
 
   const caf14 = [];
@@ -61,7 +61,14 @@ export function renderStatsView(root, { toast } = {}) {
   for (let i = historyRange - 1; i >= 0; i--) {
     const d = addDays(today, -i);
     const b = store.getDayBreakdown(d);
-    histRows.push({ d, lMin: b.l, aMin: b.a, learnTotal: b.learnTotal });
+    histRows.push({
+      d,
+      lMin: b.l,
+      aMin: b.a,
+      learnTotal: b.learnTotal,
+      goalMin: store.getGoalForDay(d),
+      isRest: store.isRestDay(d)
+    });
   }
 
   const todayDow = parseDateStr(today).getDay();
@@ -74,7 +81,14 @@ export function renderStatsView(root, { toast } = {}) {
     const col = Math.floor(i / 7);
     const row = i % 7;
     const min = d <= today ? store.getDayBreakdown(d).learnTotal : 0;
-    heatCells.push({ d, col, row, min });
+    heatCells.push({
+      d,
+      col,
+      row,
+      min,
+      goalMin: store.getGoalForDay(d),
+      isRest: store.isRestDay(d)
+    });
   }
 
   const weekdayItems = WEEKDAYS_MON.map((lbl, i) => ({
@@ -363,7 +377,7 @@ export function renderStatsView(root, { toast } = {}) {
                     <div class="small" style="font-weight:600;">${esc(c.fach)}${actMap[c.taetigkeit] ? ` · ${actMap[c.taetigkeit]}` : ''}</div>
                     <div class="xs soft">${c.anzahl} ${c.anzahl === 1 ? 'Session' : 'Sessions'} · Regel: ${c.regelMin} min</div>
                   </div>
-                  <span class="pill ${c.suggestAdjust ? 'prod' : 'kit'} mono">Ø ${c.durchschnittMin} min</span>
+                  <span class="pill ${c.suggestAdjust ? 'prod' : 'kit'} mono" title="Oberes Ende (P75 gegen Zeitdruck) · reiner Ø: ${c.echterSchnittMin} min">P75 ${c.p75Min} min</span>
                 </div>
               `).join('')}
             </div>

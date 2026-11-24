@@ -10,6 +10,7 @@ const STATE_FILENAME = 'kit-studyflow-state.json';
 const ICS_FILENAME = 'kit-calendar.ics';
 const ARCHIVE_PREFIX = 'archive-';
 const MAX_WEEKLY_ARCHIVES = 4;
+const PENDING_SYNC_KEY = 'kit_studyflow_pending_sync_v1';
 
 export function getIsoWeekKey(date = new Date()) {
   const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
@@ -20,10 +21,25 @@ export function getIsoWeekKey(date = new Date()) {
   return `${d.getUTCFullYear()}-KW${String(weekNo).padStart(2, '0')}`;
 }
 
+function loadPendingFlag() {
+  try { return localStorage.getItem(PENDING_SYNC_KEY) === '1'; } catch { return false; }
+}
+
+function persistPendingFlag(val) {
+  pendingLocalChange = Boolean(val);
+  try {
+    if (pendingLocalChange) localStorage.setItem(PENDING_SYNC_KEY, '1');
+    else localStorage.removeItem(PENDING_SYNC_KEY);
+  } catch { /* ignore */ }
+}
+
 let debounceTimer = null;
 let isSyncing = false;
-let pendingLocalChange = false;
+let pendingLocalChange = loadPendingFlag();
 let syncQueued = false;
+let lastPullAt = 0;
+let lastRemoteGistUpdatedAt = '';
+let lastSyncedIcs = '';
 const statusListeners = new Set();
 
 export function onSyncStatusChange(fn) {
@@ -97,13 +113,13 @@ async function readHttpErrorDetail(res) {
   return detail ? `HTTP ${res.status}: ${detail}` : `HTTP ${res.status}`;
 }
 
-function buildSyncPayload({ stripIcs = false } = {}) {
+function buildSyncPayload({ stripApiKey = false } = {}) {
   const clone = JSON.parse(JSON.stringify(store.state));
-  if (!clone.ai?.syncApiKeyInGist && clone.ai) {
+  // Always strip bulky raw ICS from kit-studyflow-state.json (calendar syncs separately via kit-calendar.ics)
+  // so mobile keepalive payloads remain well below the ~58 KB browser limit!
+  clone.icsRaw = '';
+  if ((stripApiKey || !clone.ai?.syncApiKeyInGist) && clone.ai) {
     clone.ai.apiKey = '';
-  }
-  if (stripIcs) {
-    clone.icsRaw = '';
   }
   return clone;
 }
@@ -114,6 +130,7 @@ function canonicalSyncSig(stateRaw) {
   delete clone.updatedAt;
   delete clone.dg;
   delete clone.ui;
+  delete clone.icsRaw;
   if (clone.ai) delete clone.ai.apiKey;
   return JSON.stringify(clone);
 }
@@ -207,11 +224,16 @@ export function mergeStates(localRaw, remoteRaw) {
       const rExplicit = rMeta[k] || 0;
 
       let winner;
-      if (lExplicit || rExplicit) {
-        const lTs = lExplicit || (lHas ? (local.updatedAt || 1) : 0);
-        const rTs = rExplicit || (rHas ? (remote.updatedAt || 1) : 0);
-        if (lTs > rTs) winner = 'local';
-        else if (rTs > lTs) winner = 'remote';
+      if (lExplicit && !rExplicit) {
+        // Explicit edit or deletion on local must NEVER lose to remote's unrelated global updatedAt
+        winner = 'local';
+        outMeta[k] = lExplicit;
+      } else if (rExplicit && !lExplicit) {
+        winner = 'remote';
+        outMeta[k] = rExplicit;
+      } else if (lExplicit && rExplicit) {
+        if (lExplicit > rExplicit) winner = 'local';
+        else if (rExplicit > lExplicit) winner = 'remote';
         else winner = remoteNewer ? 'remote' : 'local';
         outMeta[k] = Math.max(lExplicit, rExplicit);
       } else {
@@ -263,6 +285,41 @@ export function mergeStates(localRaw, remoteRaw) {
       merged.lastSyncAt = lSync;
       if (lAnki.todayMinutes !== undefined) merged.todayMinutes = lAnki.todayMinutes;
     }
+
+    // Clean per-deck merge for excludedDecks so editing secNew on one device NEVER wipes excluded decks from another
+    const lExMeta = (lAnki.excludedMeta && typeof lAnki.excludedMeta === 'object') ? lAnki.excludedMeta : {};
+    const rExMeta = (rAnki.excludedMeta && typeof rAnki.excludedMeta === 'object') ? rAnki.excludedMeta : {};
+    const lExSet = new Set(Array.isArray(lAnki.excludedDecks) ? lAnki.excludedDecks : []);
+    const rExSet = new Set(Array.isArray(rAnki.excludedDecks) ? rAnki.excludedDecks : []);
+    const allDeckKeys = new Set([
+      ...lExSet,
+      ...rExSet,
+      ...Object.keys(lExMeta),
+      ...Object.keys(rExMeta)
+    ]);
+    const mergedExMeta = {};
+    const mergedExDecks = [];
+    for (const dk of allDeckKeys) {
+      const lm = lExMeta[dk];
+      const rm = rExMeta[dk];
+      let excluded;
+      if (lm && rm) {
+        const winM = (rm.ts || 0) > (lm.ts || 0) ? rm : (lm.ts || 0) > (rm.ts || 0) ? lm : (pickRemote ? rm : lm);
+        excluded = Boolean(winM.excluded);
+        mergedExMeta[dk] = { excluded, ts: Math.max(lm.ts || 0, rm.ts || 0) };
+      } else if (lm) {
+        excluded = Boolean(lm.excluded);
+        mergedExMeta[dk] = { excluded, ts: lm.ts || 0 };
+      } else if (rm) {
+        excluded = Boolean(rm.excluded);
+        mergedExMeta[dk] = { excluded, ts: rm.ts || 0 };
+      } else {
+        excluded = lExSet.has(dk) || rExSet.has(dk);
+      }
+      if (excluded) mergedExDecks.push(dk);
+    }
+    merged.excludedDecks = mergedExDecks;
+    merged.excludedMeta = mergedExMeta;
 
     merged.updatedAt = Math.max(lTs, rTs);
     return merged;
@@ -343,6 +400,12 @@ export async function createPrivateGist() {
 
   setSyncStatus('syncing', '');
   const payload = buildSyncPayload();
+  const files = {
+    [STATE_FILENAME]: { content: JSON.stringify(payload) }
+  };
+  if (store.state.icsRaw && store.state.icsRaw.includes('BEGIN:VEVENT')) {
+    files[ICS_FILENAME] = { content: store.state.icsRaw };
+  }
   const res = await fetch('https://api.github.com/gists', {
     method: 'POST',
     cache: 'no-store',
@@ -350,11 +413,7 @@ export async function createPrivateGist() {
     body: JSON.stringify({
       description: 'KIT StudyFlow – Privater Cloud-Sync (Fokus-Tracker & Wochenplan)',
       public: false,
-      files: {
-        [STATE_FILENAME]: {
-          content: JSON.stringify(payload)
-        }
-      }
+      files
     })
   });
 
@@ -367,13 +426,16 @@ export async function createPrivateGist() {
   const data = await res.json();
   store.secrets.gistId = data.id;
   store.secrets.lastSyncAt = Date.now();
-  pendingLocalChange = false;
+  lastPullAt = Date.now();
+  lastRemoteGistUpdatedAt = data.updated_at || '';
+  if (files[ICS_FILENAME]) lastSyncedIcs = store.state.icsRaw;
+  persistPendingFlag(false);
   recordRemoteSummary(payload, data.id, 'Gist erstellt');
   setSyncStatus('ok', '');
   return data.id;
 }
 
-export async function pushToGist({ forceArchive = false, keepalive = false } = {}) {
+export async function pushToGist({ forceArchive = false, keepalive = false, force = false } = {}) {
   if (!isGistConfigured()) return { ok: false, reason: 'not_configured' };
   const token = cleanToken(store.secrets.githubToken);
   let gistId = normalizeGistId(store.secrets.gistId);
@@ -389,6 +451,30 @@ export async function pushToGist({ forceArchive = false, keepalive = false } = {
   setSyncStatus('syncing', '');
 
   try {
+    // Optimistic concurrency guard: check gist.updated_at before PATCH so parallel writes never silently clobber
+    if (!force && !keepalive && lastRemoteGistUpdatedAt) {
+      try {
+        const preRes = await fetch(
+          `https://api.github.com/gists/${encodeURIComponent(gistId)}?_t=${Date.now()}`,
+          { cache: 'no-store', headers: authHeaders(token, { withContentType: false }) }
+        );
+        if (preRes.ok) {
+          const preGist = await preRes.json();
+          if (preGist.updated_at && preGist.updated_at !== lastRemoteGistUpdatedAt) {
+            const remoteContent = await readGistFileContent(preGist.files?.[STATE_FILENAME]);
+            if (remoteContent) {
+              const remoteState = JSON.parse(remoteContent);
+              const merged = mergeStates(store.state, remoteState);
+              store.state = merged;
+              reconcileBacklogStatus();
+              store.save({ skipSync: true, preserveTimestamp: true, fromBackgroundSync: true });
+            }
+            lastRemoteGistUpdatedAt = preGist.updated_at;
+          }
+        }
+      } catch { /* non-fatal: proceed if pre-check network hiccupped */ }
+    }
+
     const payloadObj = buildSyncPayload();
     const payloadStr = JSON.stringify(payloadObj);
     const weekKey = getIsoWeekKey();
@@ -397,15 +483,21 @@ export async function pushToGist({ forceArchive = false, keepalive = false } = {
       [STATE_FILENAME]: { content: payloadStr }
     };
 
+    // Sync local calendar separately via kit-calendar.ics (only when changed, never in keepalive)
+    const shouldWriteIcs = !keepalive && Boolean(store.state.icsRaw && store.state.icsRaw.includes('BEGIN:VEVENT') && store.state.icsRaw !== lastSyncedIcs);
+    if (shouldWriteIcs) {
+      filesBody[ICS_FILENAME] = { content: store.state.icsRaw };
+    }
+
     if (shouldWriteArchive) {
-      // Strip bulky raw ICS from weekly archive snapshots to keep PATCH small & reliable on mobile
+      // ALWAYS strip both raw ICS and Gemini API key from weekly archive snapshots!
       filesBody[`${ARCHIVE_PREFIX}${weekKey}.json`] = {
-        content: JSON.stringify(buildSyncPayload({ stripIcs: true }))
+        content: JSON.stringify(buildSyncPayload({ stripApiKey: true }))
       };
     }
 
     const bodyStr = JSON.stringify({ files: filesBody });
-    // keepalive has a ~64KB browser payload cap; fall back to normal fetch if larger
+    // keepalive has a ~64KB browser payload cap; without icsRaw state stays comfortably < 58KB
     const useKeepalive = keepalive && bodyStr.length < 58000;
 
     const res = await fetch(`https://api.github.com/gists/${encodeURIComponent(gistId)}`, {
@@ -417,12 +509,16 @@ export async function pushToGist({ forceArchive = false, keepalive = false } = {
     });
     if (!res.ok) throw new Error(await readHttpErrorDetail(res));
 
+    let updatedGist = null;
+    try { updatedGist = await res.json(); } catch { /* ignore */ }
+    if (updatedGist?.updated_at) lastRemoteGistUpdatedAt = updatedGist.updated_at;
+    if (shouldWriteIcs) lastSyncedIcs = store.state.icsRaw;
+
     // Prune archives beyond the newest MAX_WEEKLY_ARCHIVES (4 weeks)
     if (shouldWriteArchive) {
       store.secrets.lastArchiveWeek = weekKey;
       try {
-        const updated = await res.json();
-        const archiveNames = Object.keys(updated.files || {})
+        const archiveNames = Object.keys(updatedGist?.files || {})
           .filter((fn) => fn.startsWith(ARCHIVE_PREFIX) && fn.endsWith('.json'))
           .sort()
           .reverse();
@@ -430,19 +526,26 @@ export async function pushToGist({ forceArchive = false, keepalive = false } = {
         if (toDelete.length) {
           const delFiles = {};
           for (const fn of toDelete) delFiles[fn] = null;
-          await fetch(`https://api.github.com/gists/${encodeURIComponent(gistId)}`, {
+          const delRes = await fetch(`https://api.github.com/gists/${encodeURIComponent(gistId)}`, {
             method: 'PATCH',
             cache: 'no-store',
             headers: authHeaders(token),
             body: JSON.stringify({ files: delFiles })
           });
+          if (delRes.ok) {
+            try {
+              const dJson = await delRes.json();
+              if (dJson?.updated_at) lastRemoteGistUpdatedAt = dJson.updated_at;
+            } catch { /* ignore */ }
+          }
         }
       } catch { /* non-fatal */ }
     }
 
-    pendingLocalChange = false;
+    persistPendingFlag(false);
+    lastPullAt = Date.now();
     store.secrets.lastSyncAt = Date.now();
-    recordRemoteSummary(payloadObj, gistId, 'Hochgeladen');
+    recordRemoteSummary(payloadObj, gistId, force ? 'Cloud überschrieben' : 'Hochgeladen');
     setSyncStatus('ok', '');
     return { ok: true, gistId, archivedWeek: shouldWriteArchive ? weekKey : '', summary: store.secrets.lastRemoteSummary };
   } catch (err) {
@@ -477,16 +580,25 @@ export async function listGistArchives() {
     }));
 }
 
-export function restoreArchiveSnapshot(jsonContent, label = 'Wochen-Archiv') {
+export function restoreArchiveSnapshot(jsonContent, label = 'Wochen-Archiv', { skipSync = true } = {}) {
   const parsed = JSON.parse(jsonContent);
   if (!parsed || typeof parsed !== 'object') throw new Error('Ungültige Archiv-Datei.');
   store.pushUndo(`Archiv ${label} geladen`);
   const localKey = store.state.ai?.apiKey || '';
+  const keepIcs = store.state.icsRaw || '';
+  const keepIcsAt = store.state.icsUpdatedAt || 0;
   const next = store._mergeDefaults(parsed);
   if (!next.ai.apiKey && localKey) next.ai.apiKey = localKey;
+  // Weekly archives strip icsRaw -> always preserve local calendar!
+  if (!next.icsRaw && keepIcs) {
+    next.icsRaw = keepIcs;
+    next.icsUpdatedAt = keepIcsAt;
+  }
+  next.updatedAt = Date.now();
   store.state = next;
+  store.invalidateCaches();
   reconcileBacklogStatus();
-  store.save();
+  store.save({ skipSync });
   return { entries: store.state.e.length, checklist: store.state.checklist.length };
 }
 
@@ -499,7 +611,7 @@ async function readGistFileContent(fileObj) {
   return fileObj.content || '';
 }
 
-export async function pullFromGist({ preferRemote = false } = {}) {
+export async function pullFromGist({ preferRemote = false, fromBackgroundSync = false } = {}) {
   const gistId = normalizeGistId(store.secrets.gistId);
   if (gistId && gistId !== store.secrets.gistId) store.secrets.gistId = gistId;
   if (!isGistConfigured() || !gistId) {
@@ -517,6 +629,8 @@ export async function pullFromGist({ preferRemote = false } = {}) {
     if (!res.ok) throw new Error(await readHttpErrorDetail(res));
     const gist = await res.json();
     const files = gist.files || {};
+    lastRemoteGistUpdatedAt = gist.updated_at || '';
+    lastPullAt = Date.now();
 
     let updatedIcs = false;
     let updatedState = false;
@@ -528,25 +642,33 @@ export async function pullFromGist({ preferRemote = false } = {}) {
       recordRemoteSummary(remoteState, gistId, preferRemote ? 'Aus Cloud geladen' : 'Abgeglichen');
       if (preferRemote) {
         const localKey = store.state.ai?.apiKey || '';
+        const keepIcs = store.state.icsRaw || '';
+        const keepIcsAt = store.state.icsUpdatedAt || 0;
         const next = store._mergeDefaults(remoteState);
         if (!next.ai.apiKey && localKey) next.ai.apiKey = localKey;
+        if (!next.icsRaw && keepIcs) {
+          next.icsRaw = keepIcs;
+          next.icsUpdatedAt = keepIcsAt;
+        }
         store.state = next;
+        store.invalidateCaches();
         reconcileBacklogStatus();
         if (store.state.autoLogLectures) syncDayLecturesToProductive(toDateStr(), { save: false });
-        store.save({ skipSync: true, preserveTimestamp: true });
+        store.save({ skipSync: true, preserveTimestamp: true, fromBackgroundSync });
         updatedState = true;
       } else {
         const localBeforeSig = canonicalSyncSig(store.state);
         const remoteSig = canonicalSyncSig(remoteState);
         const merged = mergeStates(store.state, remoteState);
         store.state = merged;
+        store.invalidateCaches();
         reconcileBacklogStatus();
         if (store.state.autoLogLectures) syncDayLecturesToProductive(toDateStr(), { save: false });
         const afterSig = canonicalSyncSig(store.state);
         updatedState = afterSig !== localBeforeSig;
         needsPushBack = afterSig !== remoteSig;
         if (updatedState) {
-          store.save({ skipSync: true, preserveTimestamp: true });
+          store.save({ skipSync: true, preserveTimestamp: true, fromBackgroundSync });
         }
       }
     } else {
@@ -556,10 +678,14 @@ export async function pullFromGist({ preferRemote = false } = {}) {
 
     const remoteIcs = await readGistFileContent(files[ICS_FILENAME]);
     if (remoteIcs) {
+      lastSyncedIcs = remoteIcs;
       if (remoteIcs !== store.state.icsRaw && remoteIcs.includes('BEGIN:VEVENT')) {
         syncModulesFromIcs(store, remoteIcs, { skipSync: true });
         updatedIcs = true;
       }
+    } else if (store.state.icsRaw && store.state.icsRaw.includes('BEGIN:VEVENT')) {
+      // Local has an ICS that isn't uploaded to kit-calendar.ics yet -> push it separately
+      needsPushBack = true;
     }
 
     store.secrets.lastSyncAt = Date.now();
@@ -573,7 +699,7 @@ export async function pullFromGist({ preferRemote = false } = {}) {
   }
 }
 
-export async function syncNow() {
+export async function syncNow({ fromBackgroundSync = false } = {}) {
   if (!isGistConfigured()) return { ok: false, error: 'Kein GitHub Token hinterlegt.' };
   const gistId = normalizeGistId(store.secrets.gistId);
   if (!gistId) {
@@ -584,7 +710,7 @@ export async function syncNow() {
     syncQueued = true;
     return { ok: true, queued: true };
   }
-  const pulled = await pullFromGist({ preferRemote: false });
+  const pulled = await pullFromGist({ preferRemote: false, fromBackgroundSync });
   let result = pulled;
   if (pulled.ok && (pulled.needsPushBack || pendingLocalChange)) {
     const pushed = await pushToGist();
@@ -592,24 +718,25 @@ export async function syncNow() {
       ? { ok: true, merged: true, pushed: true, updatedState: pulled.updatedState, updatedIcs: pulled.updatedIcs, summary: pushed.summary }
       : pushed;
   } else if (pulled.ok) {
+    persistPendingFlag(false);
     result = { ok: true, merged: true, updatedState: pulled.updatedState, updatedIcs: pulled.updatedIcs, summary: pulled.summary };
   }
 
   // Drain any edit that arrived while this sync was in flight so nothing is EVER dropped!
   if (syncQueued) {
     syncQueued = false;
-    setTimeout(() => syncNow(), 120);
+    setTimeout(() => syncNow({ fromBackgroundSync }), 120);
   }
   return result;
 }
 
 export function scheduleAutoSync() {
   if (!isGistConfigured() || !store.secrets.autoSync || !store.secrets.gistId) return;
-  pendingLocalChange = true;
+  persistPendingFlag(true);
   clearTimeout(debounceTimer);
   debounceTimer = setTimeout(() => {
     debounceTimer = null;
-    syncNow();
+    syncNow({ fromBackgroundSync: true });
   }, 650);
 }
 
@@ -618,8 +745,13 @@ export function flushPendingSync() {
   if (!pendingLocalChange && !debounceTimer) return;
   clearTimeout(debounceTimer);
   debounceTimer = null;
-  // Fire immediate keepalive PATCH so phone screen-lock / app-switch never drops the edit
-  pushToGist({ keepalive: true });
+  // Persist flag so returning online / foreground ALWAYS completes a safe pull -> merge -> push
+  persistPendingFlag(true);
+  // NEVER blindly PATCH without a fresh pull! Only send keepalive PATCH if we pulled within the last 20 seconds.
+  const pullIsFresh = lastPullAt > 0 && (Date.now() - lastPullAt) <= 20000;
+  if (pullIsFresh && !isSyncing) {
+    pushToGist({ keepalive: true });
+  }
 }
 
 function setSyncStatus(status, error = '') {

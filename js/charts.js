@@ -1,6 +1,6 @@
 // Pure SVG interactive chart components (zero external dependencies, works 100% offline)
 
-import { fmtMin, fmtDateShort, minToTime, toTimeStr, timeToMin } from './store.js';
+import { fmtMin, fmtDateShort, minToTime, toTimeStr, timeToMin, escapeHtml } from './store.js';
 
 export function renderDayTimelineSVG({ span, lectures = [], entries = [], caffeine = [] }) {
   if (!span) return '';
@@ -12,6 +12,11 @@ export function renderDayTimelineSVG({ span, lectures = [], entries = [], caffei
   const endM = Math.max(startM + 60, span.sleepMin);
   const dur = endM - startM;
   const xOf = (m) => barX + Math.max(0, Math.min(1, (m - startM) / dur)) * barW;
+  const normMin = (tStr) => {
+    let m = timeToMin(tStr);
+    if (endM > 1440 && m < startM) m += 1440;
+    return m;
+  };
 
   const nowX = xOf(span.nowMin);
   const elapsedW = Math.max(0, nowX - barX);
@@ -19,33 +24,33 @@ export function renderDayTimelineSVG({ span, lectures = [], entries = [], caffei
   const lecRects = lectures
     .filter((l) => !l.cancelled && (l.attended || l.mode === 'live'))
     .map((l) => {
-      const s = timeToMin(l.start);
-      const e = timeToMin(l.end);
+      const s = normMin(l.start);
+      const e = normMin(l.end);
       const x1 = xOf(s);
       const x2 = xOf(e);
       if (x2 <= x1) return '';
-      return `<rect x="${x1.toFixed(1)}" y="${barY}" width="${Math.max(2, x2 - x1).toFixed(1)}" height="${barH}" rx="3" fill="var(--prod)" opacity="0.72"><title>${l.shortName} (${l.start}–${l.end})</title></rect>`;
+      return `<rect x="${x1.toFixed(1)}" y="${barY}" width="${Math.max(2, x2 - x1).toFixed(1)}" height="${barH}" rx="3" fill="var(--prod)" opacity="0.72"><title>${escapeHtml(l.shortName)} (${escapeHtml(l.start)}–${escapeHtml(l.end)})</title></rect>`;
     })
     .join('');
 
   const studyRects = entries
     .filter((x) => x.k === 'l' || x.k === 'a')
     .map((x) => {
-      const endMin = timeToMin(x.t || '12:00');
+      const endMin = normMin(x.t || '12:00');
       const blockLen = Math.max(10, Math.min(240, Number(x.blockMin || x.m || 30)));
       const s = Math.max(startM, endMin - blockLen);
       const x1 = xOf(s);
       const x2 = xOf(endMin);
       if (x2 <= x1) return '';
       const color = x.k === 'a' ? 'var(--anki)' : 'var(--learn)';
-      return `<rect x="${x1.toFixed(1)}" y="${barY + 3}" width="${Math.max(3, x2 - x1).toFixed(1)}" height="${barH - 6}" rx="2.5" fill="${color}" opacity="0.92"><title>${x.k === 'a' ? 'Anki' : 'Lernen'} · ${blockLen} min (${x.t || ''})</title></rect>`;
+      return `<rect x="${x1.toFixed(1)}" y="${barY + 3}" width="${Math.max(3, x2 - x1).toFixed(1)}" height="${barH - 6}" rx="2.5" fill="${color}" opacity="0.92"><title>${x.k === 'a' ? 'Anki' : 'Lernen'} · ${blockLen} min (${escapeHtml(x.t || '')})</title></rect>`;
     })
     .join('');
 
   const cafTicks = caffeine.map((c) => {
-    const cx = xOf(timeToMin(c.t));
+    const cx = xOf(normMin(c.t));
     return `
-      <line x1="${cx.toFixed(1)}" y1="${barY - 6}" x2="${cx.toFixed(1)}" y2="${barY}" stroke="var(--caf)" stroke-width="2" stroke-linecap="round"><title>Koffein ${c.mg} mg (${c.t})</title></line>
+      <line x1="${cx.toFixed(1)}" y1="${barY - 6}" x2="${cx.toFixed(1)}" y2="${barY}" stroke="var(--caf)" stroke-width="2" stroke-linecap="round"><title>Koffein ${Number(c.mg) || 0} mg (${escapeHtml(c.t)})</title></line>
       <circle cx="${cx.toFixed(1)}" cy="${barY - 7}" r="2.2" fill="var(--caf)" />
     `;
   }).join('');
@@ -301,7 +306,7 @@ export function renderWakeRatioBarsSVG(rows) {
         const yP = yA - hP;
         const tip = `${fmtDateShort(r.d)} · Wachzeit ${fmtMin(r.awakeMin)} · Lernen ${fmtMin(r.lMin)} (${r.lPct.toFixed(1)}%) · Anki ${fmtMin(r.aMin)} (${r.aPct.toFixed(1)}%) · Vorlesung/Prod. ${fmtMin(r.pMin)} (${r.pPct.toFixed(1)}%) · Ges. ${r.totalPct.toFixed(1)}%`;
         return `
-          <g class="bar-hit" data-tip="${tip.replace(/"/g, '&quot;')}" style="cursor:pointer;">
+          <g class="bar-hit" data-tip="${escapeHtml(tip)}" style="cursor:pointer;">
             <rect x="${x - 2}" y="${padT}" width="${barW + 4}" height="${plotH}" fill="transparent" />
             ${hL > 0 ? `<rect x="${x}" y="${yL}" width="${barW}" height="${hL}" rx="2" fill="var(--learn)" />` : ''}
             ${hA > 0 ? `<rect x="${x}" y="${yA}" width="${barW}" height="${hA}" rx="2" fill="var(--anki)" />` : ''}
@@ -315,7 +320,7 @@ export function renderWakeRatioBarsSVG(rows) {
 }
 
 export function renderHistoryBarsSVG(rows, goalMin) {
-  // rows: [{ d, lMin, aMin, learnTotal }] oldest -> newest
+  // rows: [{ d, lMin, aMin, learnTotal, goalMin?, isRest? }] oldest -> newest
   const W = 580, H = 195;
   const padL = 36, padR = 12, padT = 14, padB = 28;
   const plotW = W - padL - padR;
@@ -344,16 +349,19 @@ export function renderHistoryBarsSVG(rows, goalMin) {
       ${rows.map((r, i) => {
         const cx = padL + i * barSlot + barSlot / 2;
         const x = cx - barW / 2;
-        const hitGoal = r.learnTotal >= goalMin;
+        const rowGoal = r.goalMin !== undefined ? r.goalMin : goalMin;
+        const hitGoal = rowGoal > 0 ? r.learnTotal >= rowGoal : r.learnTotal > 0;
         const hL = (r.lMin / yMaxMin) * plotH;
         const hA = (r.aMin / yMaxMin) * plotH;
         const yBase = padT + plotH;
-        const tip = `${fmtDateShort(r.d)} · Lernen inkl. Anki: ${fmtMin(r.learnTotal)} (davon Anki: ${fmtMin(r.aMin)})${hitGoal ? ' · Ziel erreicht' : ''}`;
+        const restLabel = r.isRest ? ` · Ruhetag (Ziel ${fmtMin(rowGoal)})` : '';
+        const tip = `${fmtDateShort(r.d)} · Lernen inkl. Anki: ${fmtMin(r.learnTotal)} (davon Anki: ${fmtMin(r.aMin)})${restLabel}${hitGoal ? ' · Ziel erreicht' : r.isRest ? ' · Serie geschützt' : ''}`;
         return `
-          <g class="bar-hit" data-tip="${tip.replace(/"/g, '&quot;')}" style="cursor:pointer;">
+          <g class="bar-hit" data-tip="${escapeHtml(tip)}" style="cursor:pointer;">
             <rect x="${x - 1}" y="${padT}" width="${barW + 2}" height="${plotH}" fill="transparent" />
             ${hL > 0 ? `<rect x="${x}" y="${yBase - hL}" width="${barW}" height="${hL}" rx="2" fill="var(--learn)" opacity="${hitGoal ? '1' : '0.45'}" />` : ''}
             ${hA > 0 ? `<rect x="${x}" y="${yBase - hL - hA}" width="${barW}" height="${hA}" rx="2" fill="var(--anki)" opacity="${hitGoal ? '1' : '0.78'}" />` : ''}
+            ${r.isRest && r.learnTotal === 0 ? `<circle cx="${cx}" cy="${yBase - 4}" r="2.2" fill="var(--kit)" opacity="0.55" />` : ''}
             ${(i % labelStep === 0 || i === n - 1) ? `<text x="${cx}" y="${H - 8}" text-anchor="middle" font-size="9.5" fill="var(--text-soft)">${fmtDateShort(r.d).slice(0, 5)}</text>` : ''}
           </g>
         `;
@@ -383,7 +391,7 @@ export function renderCaffeine14dSVG(rows, limitMg = 400) {
         const h = (r.mg / maxMg) * plotH;
         const tip = `${fmtDateShort(r.d)} · ${r.mg} mg Koffein`;
         return `
-          <g class="bar-hit" data-tip="${tip}" style="cursor:pointer;">
+          <g class="bar-hit" data-tip="${escapeHtml(tip)}" style="cursor:pointer;">
             <rect x="${cx - barW / 2}" y="${padT}" width="${barW}" height="${plotH}" fill="transparent" />
             ${h > 0 ? `<rect x="${cx - barW / 2}" y="${padT + plotH - h}" width="${barW}" height="${h}" rx="3" fill="${r.mg > limitMg ? 'var(--danger)' : 'var(--caf)'}" />` : ''}
             ${i % 2 === 0 ? `<text x="${cx}" y="${H - 6}" text-anchor="middle" font-size="9.5" fill="var(--text-soft)">${fmtDateShort(r.d).slice(0, 5)}</text>` : ''}
@@ -395,7 +403,7 @@ export function renderCaffeine14dSVG(rows, limitMg = 400) {
 }
 
 export function renderHeatmap20WeeksSVG(cells, goalMin) {
-  // cells: 140 items [{ d, min, col (0..19), row (0..6) }]
+  // cells: 140 items [{ d, min, col (0..19), row (0..6), goalMin?, isRest? }]
   const cellSize = 15;
   const gap = 4;
   const padL = 24;
@@ -404,9 +412,10 @@ export function renderHeatmap20WeeksSVG(cells, goalMin) {
   const H = padT + 7 * (cellSize + gap) + 8;
   const dayLabels = ['Mo', '', 'Mi', '', 'Fr', '', 'So'];
 
-  const colorFor = (min) => {
-    if (min <= 0) return 'var(--bg-soft)';
-    const r = goalMin > 0 ? min / goalMin : 0.5;
+  const colorFor = (c) => {
+    const cellGoal = c.goalMin !== undefined ? c.goalMin : goalMin;
+    if (c.min <= 0) return c.isRest ? 'rgba(0, 150, 130, 0.10)' : 'var(--bg-soft)';
+    const r = cellGoal > 0 ? c.min / cellGoal : 1;
     if (r >= 1) return 'var(--kit)';
     if (r >= 0.7) return 'rgba(0, 150, 130, 0.72)';
     if (r >= 0.4) return 'rgba(0, 150, 130, 0.45)';
@@ -419,8 +428,11 @@ export function renderHeatmap20WeeksSVG(cells, goalMin) {
       ${cells.map((c) => {
         const x = padL + c.col * (cellSize + gap);
         const y = padT + c.row * (cellSize + gap);
-        const tip = `${fmtDateShort(c.d)} · ${fmtMin(c.min)}${c.min >= goalMin ? ' · Ziel erreicht' : ''}`;
-        return `<rect class="bar-hit" data-tip="${tip}" x="${x}" y="${y}" width="${cellSize}" height="${cellSize}" rx="3.5" fill="${colorFor(c.min)}" stroke="var(--border)" stroke-width="0.6" style="cursor:pointer;" />`;
+        const cellGoal = c.goalMin !== undefined ? c.goalMin : goalMin;
+        const hit = cellGoal > 0 ? c.min >= cellGoal : c.min > 0;
+        const restNote = c.isRest ? ` · Ruhetag (Ziel ${fmtMin(cellGoal)})` : '';
+        const tip = `${fmtDateShort(c.d)} · ${fmtMin(c.min)}${restNote}${hit ? ' · Ziel erreicht' : c.isRest ? ' · Serie geschützt' : ''}`;
+        return `<rect class="bar-hit" data-tip="${escapeHtml(tip)}" x="${x}" y="${y}" width="${cellSize}" height="${cellSize}" rx="3.5" fill="${colorFor(c)}" stroke="${c.isRest && c.min <= 0 ? 'rgba(0, 150, 130, 0.28)' : 'var(--border)'}" stroke-width="0.6" style="cursor:pointer;" />`;
       }).join('')}
     </svg>
   `;
@@ -442,12 +454,13 @@ export function renderSimpleBarsSVG(items, { valueFormatter = (v) => String(v), 
         const cx = padL + i * slot + slot / 2;
         const h = (it.value / maxVal) * plotH;
         const y = padT + plotH - h;
+        const tip = it.tip || `${it.label}: ${valueFormatter(it.value)}`;
         return `
-          <g class="bar-hit" data-tip="${(it.tip || `${it.label}: ${valueFormatter(it.value)}`).replace(/"/g, '&quot;')}" style="cursor:pointer;">
+          <g class="bar-hit" data-tip="${escapeHtml(tip)}" style="cursor:pointer;">
             <rect x="${cx - barW / 2}" y="${padT}" width="${barW}" height="${plotH}" fill="transparent" />
             ${h > 0 ? `<rect x="${cx - barW / 2}" y="${y}" width="${barW}" height="${h}" rx="3" fill="${color}" />` : ''}
-            ${items.length <= 8 && it.value > 0 ? `<text x="${cx}" y="${Math.max(12, y - 4)}" text-anchor="middle" font-size="9.5" fill="var(--text-muted)">${valueFormatter(it.value)}</text>` : ''}
-            ${(items.length <= 12 || i % 2 === 0) ? `<text x="${cx}" y="${H - 6}" text-anchor="middle" font-size="9.5" fill="var(--text-soft)">${it.label}</text>` : ''}
+            ${items.length <= 8 && it.value > 0 ? `<text x="${cx}" y="${Math.max(12, y - 4)}" text-anchor="middle" font-size="9.5" fill="var(--text-muted)">${escapeHtml(valueFormatter(it.value))}</text>` : ''}
+            ${(items.length <= 12 || i % 2 === 0) ? `<text x="${cx}" y="${H - 6}" text-anchor="middle" font-size="9.5" fill="var(--text-soft)">${escapeHtml(it.label)}</text>` : ''}
           </g>
         `;
       }).join('')}

@@ -251,7 +251,7 @@ export function generateQrMatrix(text) {
 export function renderQrSvg(text, px = 220) {
   const mat = generateQrMatrix(text);
   const n = mat.length;
-  const q = 3; // quiet zone
+  const q = 4; // ISO/IEC 18004 standard quiet zone (4 modules)
   const total = n + q * 2;
   let paths = '';
   for (let r = 0; r < n; r++) {
@@ -280,6 +280,9 @@ function fromB64Url(str) {
 }
 
 async function deriveKey(pin, salt) {
+  if (typeof crypto === 'undefined' || !crypto.subtle) {
+    throw new Error('PIN-Verschlüsselung benötigt HTTPS (z. B. GitHub Pages) oder localhost/127.0.0.1. Über ungesichertes LAN-HTTP blockiert der Browser Web Crypto.');
+  }
   const baseKey = await crypto.subtle.importKey('raw', new TextEncoder().encode(pin), 'PBKDF2', false, ['deriveKey']);
   return crypto.subtle.deriveKey(
     { name: 'PBKDF2', salt, iterations: 60000, hash: 'SHA-256' },

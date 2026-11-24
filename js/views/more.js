@@ -7,10 +7,11 @@ import {
   fmtMin,
   fmtHours,
   toDateStr,
-  toTimeStr
+  toTimeStr,
+  escapeHtml as esc
 } from '../store.js';
 import { AVAILABLE_MODELS, testGeminiConnection } from '../gemini.js';
-import { createPrivateGist, pullFromGist, pushToGist, syncNow, listGistArchives, restoreArchiveSnapshot, normalizeGistId } from '../sync.js';
+import { createPrivateGist, pullFromGist, pushToGist, syncNow, listGistArchives, restoreArchiveSnapshot, normalizeGistId, isGistConfigured } from '../sync.js';
 import { syncModulesFromIcs } from '../ics.js';
 import { syncAnkiConnect, setManualAnki, getAnkiLoadSummary } from '../anki.js';
 import { renderQrSvg, encodePairingCode } from '../qr.js';
@@ -18,17 +19,10 @@ import { icon } from '../icons.js';
 
 let activeSubtab = 'achievements';
 let wipeConfirmArmed = false;
+let wipeConfirmTimer = null;
 
 export function setMoreSubtab(tab) {
   if (tab === 'achievements' || tab === 'settings') activeSubtab = tab;
-}
-
-function esc(str) {
-  return String(str ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
 }
 
 export function renderMoreView(root, ctx) {
@@ -206,7 +200,7 @@ export function renderMoreView(root, ctx) {
           <div class="card-header">
             <h2 class="card-title">${icon('cloud', 15)} GitHub Gist Cloud-Sync (Win 11 ↔ Pixel 9a)</h2>
             <div class="row" style="gap:6px;">
-              <span class="pill">App v14</span>
+              <span class="pill">App v17</span>
               <span class="pill ${store.secrets.lastSyncStatus === 'ok' ? 'kit' : store.secrets.lastSyncStatus === 'err' ? 'danger' : ''}">
                 ${store.secrets.lastSyncAt ? `Sync ${toTimeStr(new Date(store.secrets.lastSyncAt))}` : 'Lokal'}
               </span>
@@ -447,6 +441,42 @@ export function renderMoreView(root, ctx) {
     location.reload();
   });
 
+  // Helper: Ask user explicitly whether destructive local replacement (Archive / Backup Replace / Wipe) should also overwrite Cloud Gist
+  const promptCloudOverwrite = (title, description) => {
+    if (!isGistConfigured() || !store.secrets.gistId) return;
+    openModal(`
+      <div class="card-header">
+        <h3 class="card-title">${esc(title)}</h3>
+        <button class="icon-btn" id="m-close">${icon('x', 15)}</button>
+      </div>
+      <p class="small muted" style="margin-top:0;">${esc(description)}</p>
+      <p class="xs muted">
+        Wenn du <strong>Nur lokal behalten</strong> wählst, wird Auto-Sync pausiert, damit dein Cloud-Stand die Aktion nicht sofort wieder rückgängig macht.
+      </p>
+      <div class="row" style="justify-content:flex-end;margin-top:12px;">
+        <button type="button" class="btn btn-sm" id="co-local-only">Nur lokal (Auto-Sync aus)</button>
+        <button type="button" class="btn btn-danger btn-sm" id="co-push-cloud">${icon('upload', 13)} Auch in Cloud überschreiben</button>
+      </div>
+    `, (modalEl) => {
+      const pauseLocal = () => {
+        store.secrets.autoSync = false;
+        store.saveSecrets({ silent: false });
+        closeModal();
+        toast('Nur lokal übernommen (Auto-Sync vorübergehend deaktiviert).', 'ok');
+      };
+      modalEl.querySelector('#m-close')?.addEventListener('click', pauseLocal);
+      modalEl.querySelector('#co-local-only')?.addEventListener('click', pauseLocal);
+      modalEl.querySelector('#co-push-cloud')?.addEventListener('click', async () => {
+        const btn = modalEl.querySelector('#co-push-cloud');
+        if (btn) btn.disabled = true;
+        const res = await pushToGist({ force: true });
+        closeModal();
+        if (res.ok) toast('Stand erfolgreich in die Cloud übernommen.', 'ok');
+        else toast(`Cloud-Upload fehlgeschlagen: ${res.error || res.reason}`, 'err');
+      });
+    });
+  };
+
   // Weekly Gist Archives Modal (#8)
   root.querySelector('#btn-gist-archives')?.addEventListener('click', () => {
     saveGistInputs();
@@ -460,7 +490,7 @@ export function renderMoreView(root, ctx) {
         <button class="icon-btn" id="m-close">${icon('x', 15)}</button>
       </div>
       <p class="xs muted" style="margin-top:0;">
-        Automatisch wird 1x pro Kalenderwoche ein unveränderlicher Snapshot (letzte 4 Wochen) in deinem privaten Gist gespeichert.
+        Automatisch wird 1x pro Kalenderwoche ein unveränderlicher Snapshot (letzte 4 Wochen, ohne API-Key) in deinem privaten Gist gespeichert.
       </p>
       <div class="stack">
         <div class="row">
@@ -493,9 +523,13 @@ export function renderMoreView(root, ctx) {
               const a = items[Number(btn.getAttribute('data-arch-restore'))];
               if (!a) return;
               try {
-                const r = restoreArchiveSnapshot(a.content, a.label);
+                const r = restoreArchiveSnapshot(a.content, a.label, { skipSync: true });
                 closeModal();
-                toast(`Archiv ${a.label} wiederhergestellt (${r.entries} Einträge).`, 'ok', { undo: true });
+                toast(`Archiv ${a.label} lokal geladen (${r.entries} Einträge · Kalender behalten).`, 'ok', { undo: true });
+                promptCloudOverwrite(
+                  `Archiv ${a.label} in Cloud übernehmen?`,
+                  'Das Wochen-Archiv wurde lokal geladen (dein Stundenplan blieb erhalten). Soll dieser Stand auch den aktuellen Cloud-Gist überschreiben?'
+                );
               } catch (err) {
                 toast(`Fehler: ${err.message}`, 'err');
               }
@@ -521,50 +555,105 @@ export function renderMoreView(root, ctx) {
     });
   });
 
-  // Pixel 9a Offline QR Pairing (#8)
+  // Pixel 9a Offline QR Pairing (#8 – PIN-encrypted by default + localhost guard + Web Crypto error check)
   root.querySelector('#btn-pair-qr')?.addEventListener('click', () => {
     saveGistInputs();
     if (!store.secrets.githubToken || !store.secrets.gistId) {
       toast('Bitte zuerst GitHub Token & Gist-ID eintragen (oder Gist anlegen).', 'err');
       return;
     }
+    const isLocalOrigin = location.hostname === '127.0.0.1' || location.hostname === 'localhost';
+    const savedPublicUrl = (store.secrets.publicAppUrl || '').trim();
+    const defaultTargetUrl = isLocalOrigin ? savedPublicUrl : `${location.origin}${location.pathname}`;
+
     openModal(`
       <div class="card-header">
         <h3 class="card-title">Pixel 9a per QR-Code koppeln</h3>
         <button class="icon-btn" id="m-close">${icon('x', 15)}</button>
       </div>
       <p class="xs muted" style="margin-top:0;">
-        Der QR-Code wird 100 % lokal offline erzeugt. Optional eine kurze PIN vergeben, damit Token & Key AES-verschlüsselt übertragen werden.
+        Der QR-Code wird 100 % lokal offline erzeugt. Standardmäßig werden Token & Key per <strong>AES-256-GCM mit deiner PIN</strong> verschlüsselt.
       </p>
       <div class="stack">
+        ${isLocalOrigin ? `
+          <div class="banner warn" style="margin:0;">
+            <span class="xs"><strong>Lokaler Start erkannt (${esc(location.origin)}):</strong> Ein QR-Link auf <code>127.0.0.1</code> funktioniert am Handy nicht. Trag deine GitHub-Pages-URL ein oder nutze „Kopplungs-Code kopieren“.</span>
+          </div>
+          <div class="field">
+            <label>GitHub-Pages-URL der App (für QR-Link am Handy)</label>
+            <input type="url" id="qr-target-url" class="input mono" value="${esc(defaultTargetUrl)}" placeholder="https://dein-name.github.io/kit-study-planner/" />
+          </div>
+        ` : ''}
         <div class="row">
-          <input type="password" id="qr-pin" class="input mono" style="flex:1;" placeholder="Optionale PIN (z. B. 4–6 Ziffern)" />
+          <input type="password" id="qr-pin" class="input mono" style="flex:1;" placeholder="PIN (Standard: 4–6 Ziffern für AES-Schutz)" autocomplete="off" />
           <label class="row xs muted" style="cursor:pointer;">
             <input type="checkbox" id="qr-inc-ai" checked /> Gemini-Key mitgeben
           </label>
           <button class="btn btn-primary btn-sm" id="qr-gen">QR erzeugen</button>
         </div>
+        <label class="row xs muted" style="cursor:pointer;">
+          <input type="checkbox" id="qr-allow-plain" />
+          Ohne PIN erlauben (unverschlüsselt — nur privat scannen)
+        </label>
         <div id="qr-out" class="stack hidden" style="align-items:center;padding-top:8px;"></div>
       </div>
     `, (modalEl) => {
       modalEl.querySelector('#m-close')?.addEventListener('click', closeModal);
       const renderCode = async () => {
         const pin = modalEl.querySelector('#qr-pin').value.trim();
+        const allowPlain = Boolean(modalEl.querySelector('#qr-allow-plain')?.checked);
+        if (!pin && !allowPlain) {
+          toast('Bitte vergib eine PIN (Standard) oder hake explizit „Ohne PIN erlauben“ an.', 'err');
+          modalEl.querySelector('#qr-pin')?.focus();
+          return;
+        }
         const incAi = modalEl.querySelector('#qr-inc-ai').checked;
         const payload = { gt: store.secrets.githubToken.trim(), gid: store.secrets.gistId.trim() };
         if (incAi && store.state.ai.apiKey) payload.ak = store.state.ai.apiKey.trim();
-        const code = await encodePairingCode(payload, pin);
-        const baseUrl = `${location.origin}${location.pathname}`;
-        const pairUrl = `${baseUrl}#pair=${encodeURIComponent(code)}`;
+
+        let code;
+        try {
+          code = await encodePairingCode(payload, pin);
+        } catch (err) {
+          toast(err.message || 'Verschlüsselung fehlgeschlagen.', 'err');
+          return;
+        }
+
+        let baseUrl = `${location.origin}${location.pathname}`;
+        if (isLocalOrigin) {
+          const customUrl = (modalEl.querySelector('#qr-target-url')?.value || '').trim();
+          if (customUrl) {
+            store.secrets.publicAppUrl = customUrl;
+            store.saveSecrets({ silent: true });
+            baseUrl = customUrl;
+          } else {
+            baseUrl = '';
+          }
+        }
+
         const out = modalEl.querySelector('#qr-out');
         out.classList.remove('hidden');
-        out.innerHTML = `
-          <div style="padding:10px;background:#fff;border-radius:12px;">${renderQrSvg(pairUrl, 230)}</div>
-          <div class="xs muted">${pin ? 'AES-GCM PIN-verschlüsselt' : 'Unverschlüsselt (nur privat scannen)'} · Auf GitHub Pages direkt per Kamera öffnen</div>
-          <div class="row">
-            <button class="btn btn-sm" id="qr-copy-code">${icon('copy', 13)} Kopplungs-Code kopieren</button>
-          </div>
-        `;
+
+        if (isLocalOrigin && (!baseUrl || /^https?:\/\/(?:127\.0\.0\.1|localhost)(?::|\/|$)/i.test(baseUrl))) {
+          out.innerHTML = `
+            <div class="xs" style="color:var(--gold);text-align:center;">
+              Keine gültige GitHub-Pages-URL angegeben — daher kein <code>127.0.0.1</code>-QR erzeugt.<br/>
+              Kopiere einfach den ${pin ? 'AES-verschlüsselten' : 'unverschlüsselten'} Code und füge ihn am Handy unter <strong>Mit Code koppeln</strong> ein:
+            </div>
+            <div class="row">
+              <button class="btn btn-primary btn-sm" id="qr-copy-code">${icon('copy', 13)} Kopplungs-Code kopieren</button>
+            </div>
+          `;
+        } else {
+          const pairUrl = `${baseUrl}#pair=${encodeURIComponent(code)}`;
+          out.innerHTML = `
+            <div style="padding:10px;background:#fff;border-radius:12px;">${renderQrSvg(pairUrl, 230)}</div>
+            <div class="xs muted">${pin ? 'AES-256-GCM PIN-verschlüsselt' : 'Unverschlüsselt (nur privat scannen)'} · Ziel: <span class="mono">${esc(baseUrl)}</span></div>
+            <div class="row">
+              <button class="btn btn-sm" id="qr-copy-code">${icon('copy', 13)} Kopplungs-Code kopieren</button>
+            </div>
+          `;
+        }
         out.querySelector('#qr-copy-code')?.addEventListener('click', async () => {
           try { await navigator.clipboard.writeText(code); toast('Kopplungs-Code kopiert.', 'ok'); }
           catch { toast('Kopieren fehlgeschlagen.', 'err'); }
@@ -607,12 +696,11 @@ export function renderMoreView(root, ctx) {
   root.querySelector('#btn-save-anki')?.addEventListener('click', () => {
     const mode = root.querySelector('#s-anki-mode').value;
     store.state.anki.url = root.querySelector('#s-anki-url').value.trim() || 'http://127.0.0.1:8765';
-    setManualAnki({
-      secNew: root.querySelector('#s-anki-snew').value,
-      secLearn: root.querySelector('#s-anki-slearn').value,
-      secReview: root.querySelector('#s-anki-srev').value
-    });
+    store.state.anki.secNew = Math.max(5, Math.round(Number(root.querySelector('#s-anki-snew').value) || 45));
+    store.state.anki.secLearn = Math.max(5, Math.round(Number(root.querySelector('#s-anki-slearn').value) || 30));
+    store.state.anki.secReview = Math.max(5, Math.round(Number(root.querySelector('#s-anki-srev').value) || 15));
     store.state.anki.mode = mode;
+    store.state.anki.updatedAt = Date.now();
     store.save();
     toast('Anki-Einstellungen gespeichert.', 'ok');
   });
@@ -648,8 +736,15 @@ export function renderMoreView(root, ctx) {
 
   const doImport = (text, strategy) => {
     try {
-      const res = store.importBackupJSON(text, strategy);
+      const hasCloud = isGistConfigured() && Boolean(store.secrets.gistId);
+      const res = store.importBackupJSON(text, strategy, { skipSync: strategy === 'replace' && hasCloud });
       toast(`Importiert: ${res.entries} Einträge, ${res.wakes} Aufwachzeiten, ${res.caffeine} Koffein.`, 'ok');
+      if (strategy === 'replace' && hasCloud) {
+        promptCloudOverwrite(
+          'Backup-Ersatz in Cloud übernehmen?',
+          'Das Backup hat deinen lokalen Stand ersetzt. Soll dieser Stand auch den aktuellen Cloud-Gist überschreiben (sonst holt der nächste Sync den alten Cloud-Stand zurück)?'
+        );
+      }
     } catch (err) { toast(`Import-Fehler: ${err.message}`, 'err'); }
   };
 
@@ -674,11 +769,24 @@ export function renderMoreView(root, ctx) {
     if (!wipeConfirmArmed) {
       wipeConfirmArmed = true;
       renderMoreView(root, ctx);
-      setTimeout(() => { wipeConfirmArmed = false; }, 6000);
+      clearTimeout(wipeConfirmTimer);
+      wipeConfirmTimer = setTimeout(() => {
+        wipeConfirmArmed = false;
+        const b = document.getElementById('btn-wipe-all');
+        if (b) b.textContent = 'Alles löschen (1/2)';
+      }, 6000);
       return;
     }
+    clearTimeout(wipeConfirmTimer);
     wipeConfirmArmed = false;
-    store.wipeAllData();
+    const hasCloud = isGistConfigured() && Boolean(store.secrets.gistId);
+    store.wipeAllData({ skipSync: hasCloud });
     toast('Alle lokalen Daten gelöscht.', 'err', { undo: true });
+    if (hasCloud) {
+      promptCloudOverwrite(
+        'Cloud-Stand ebenfalls leeren?',
+        'Alle lokalen Daten wurden gelöscht. Soll der private GitHub Gist ebenfalls geleert werden, oder willst du Auto-Sync pausieren, damit die alten Daten nicht zurückgeladen werden?'
+      );
+    }
   });
 }

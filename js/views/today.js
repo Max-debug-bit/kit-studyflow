@@ -10,7 +10,8 @@ import {
   fmtDateShort,
   pad2,
   WEEKDAYS_DE,
-  parseDateStr
+  parseDateStr,
+  escapeHtml as esc
 } from '../store.js';
 import {
   reconcileBacklogStatus,
@@ -22,6 +23,8 @@ import {
   toggleChecklistItem,
   deleteChecklistItem,
   moveChecklistItemToDate,
+  estimateChecklistItemMinutes,
+  inferMetaFromChecklistItem,
   getWeekAheadImpact,
   getUnfinishedFromYesterday,
   rolloverYesterdayToToday,
@@ -46,14 +49,6 @@ let selectedTimerKind = 'l';
 let selectedTimerMin = 45;
 let activeTimerTick = null;
 
-function esc(str) {
-  return String(str ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
-
 function fmtHMS(totalSec) {
   const s = Math.max(0, Math.floor(totalSec));
   const h = Math.floor(s / 3600);
@@ -65,7 +60,7 @@ function fmtHMS(totalSec) {
 export function renderTodayView(root, ctx) {
   const { toast, navigate, promptLogFromChecklist } = ctx;
   if (activeTimerTick) {
-    clearInterval(activeTimerTick);
+    clearTimeout(activeTimerTick);
     activeTimerTick = null;
   }
 
@@ -86,8 +81,9 @@ export function renderTodayView(root, ctx) {
   const streaks = store.getStreakStats(today);
   const live = store.getLiveRatio(today, now);
   const caf = store.getCaffeineTodaySummary(now);
-  const todayEntries = store.state.e.filter((x) => x.d === today);
+  const todayEntries = store.getEntriesForDate(today);
   const anki = getAnkiLoadSummary();
+  const calibratedCatalog = store.getCalibratedTaskCatalog();
   const minDailyAnki = Math.max(10, Number(store.state.anki.minDailyAnkiMin) || 30);
   const ankiSyncedToday = Boolean(anki.lastSyncAt && toDateStr(new Date(anki.lastSyncAt)) === today);
   const ankiDoneToday = store.isAnkiDoneDay(today, anki.totalDue);
@@ -222,7 +218,9 @@ export function renderTodayView(root, ctx) {
         </div>
 
         <div class="check-list">
-          ${todayItems.map((it) => `
+          ${todayItems.map((it) => {
+            const est = estimateChecklistItemMinutes(it, calibratedCatalog);
+            return `
             <div class="check-item ${it.done ? 'done' : ''}">
               <div class="check-item-main" data-chk-toggle="${esc(it.id)}">
                 <span class="check-box">${it.done ? icon('check', 12) : ''}</span>
@@ -235,11 +233,12 @@ export function renderTodayView(root, ctx) {
               </div>
               <div class="check-actions">
                 ${!it.done ? `<button class="btn btn-xs btn-ghost" data-chk-tomorrow="${esc(it.id)}" title="Auf morgen verschieben">${icon('arrowRight', 12)}</button>` : ''}
-                ${!it.done ? `<button class="btn btn-xs btn-ghost" data-chk-timer="${esc(it.id)}" data-kind="${esc(it.kind)}" data-dur="${it.estMin || 45}" title="Mit Timer starten">${icon('play', 12)}</button>` : ''}
+                ${!it.done ? `<button class="btn btn-xs btn-ghost" data-chk-timer="${esc(it.id)}" data-kind="${esc(it.kind)}" data-dur="${est || 45}" title="Mit Timer starten (~${est || 45} min)">${icon('play', 12)}</button>` : ''}
                 <button class="btn btn-xs btn-ghost" data-chk-del="${esc(it.id)}" title="Entfernen">${icon('x', 13)}</button>
               </div>
             </div>
-          `).join('') || `
+          `;
+          }).join('') || `
             <div class="small muted" style="padding:10px 4px;">
               Noch keine Punkte für heute. Füge unten schnell Aufgaben hinzu, importiere deinen Text-Plan unter <strong>Wochenplan</strong> oder lass <strong>KI-Planer</strong> deine Woche bauen.
             </div>
@@ -786,11 +785,19 @@ export function renderTodayView(root, ctx) {
 
   root.querySelectorAll('[data-chk-timer]').forEach((btn) => {
     btn.addEventListener('click', () => {
+      const chkId = btn.getAttribute('data-chk-timer');
+      const it = store.state.checklist.find((x) => x.id === chkId);
+      const meta = it ? inferMetaFromChecklistItem(it) : { kind: btn.getAttribute('data-kind') || 'l', mod: '', act: '' };
+      const catId = it?.catalogId || (meta.kind !== 'a' ? (store.matchCatalogItemForText(it?.title || '', meta.act, meta.mod)?.id || '') : '');
       store.startTimer({
         mode: 'countdown',
-        kind: btn.getAttribute('data-kind') || 'l',
+        kind: btn.getAttribute('data-kind') || meta.kind || 'l',
         durationMin: Number(btn.getAttribute('data-dur')) || 45,
-        planBlockId: btn.getAttribute('data-chk-timer')
+        planBlockId: chkId,
+        mod: meta.mod || '',
+        note: it?.title || '',
+        act: meta.act || '',
+        catalogId: catId
       });
       toast('Timer gestartet.', 'ok');
       setTimeout(() => document.getElementById('timer-card')?.scrollIntoView({ behavior: 'smooth' }), 60);
@@ -1051,30 +1058,48 @@ export function renderTodayView(root, ctx) {
     toast('Timer verworfen.');
   });
 
-  // Live 1s tick
-  activeTimerTick = setInterval(() => {
-    const expired = store.checkExpiredTimer();
-    if (expired) { toast(expired.message, 'ok'); return; }
-    const st = store.getTimerStatus();
-    const clockEl = document.getElementById('timer-clock');
-    if (st && clockEl) clockEl.textContent = st.mode === 'countdown' ? fmtHMS(st.remainingSec) : fmtHMS(st.elapsedSec);
-    const lr = store.getLiveRatio(toDateStr(), new Date());
-    if (lr.hasWake) {
-      const aEl = document.getElementById('live-awake-badge');
-      const lEl = document.getElementById('lq-learn');
-      const pEl = document.getElementById('lq-prod');
-      const bEl = document.getElementById('lq-both');
-      if (aEl) aEl.textContent = `Wach: ${fmtMin(lr.span.elapsedMin)}`;
-      if (lEl) lEl.textContent = `${lr.learnPct.toFixed(1)} %`;
-      if (pEl) pEl.textContent = `${lr.prodPct.toFixed(1)} %`;
-      if (bEl) bEl.textContent = `${lr.bothPct.toFixed(1)} %`;
-    }
-  }, 1000);
+  // Adaptive tick: 1s only while timer is running & tab visible; 30s otherwise; auto-rerenders at midnight rollover!
+  const renderedDate = today;
+  const scheduleTick = () => {
+    const running = Boolean(store.getTimerStatus());
+    const hidden = document.visibilityState === 'hidden';
+    const delayMs = (!hidden && running) ? 1000 : 30000;
+    activeTimerTick = setTimeout(() => {
+      activeTimerTick = null;
+      if (document.visibilityState === 'hidden') {
+        scheduleTick();
+        return;
+      }
+      const nowDay = toDateStr();
+      if (nowDay !== renderedDate) {
+        renderTodayView(root, ctx);
+        return;
+      }
+      const expired = store.checkExpiredTimer();
+      if (expired) { toast(expired.message, 'ok'); return; }
+      const st = store.getTimerStatus();
+      const clockEl = document.getElementById('timer-clock');
+      if (st && clockEl) clockEl.textContent = st.mode === 'countdown' ? fmtHMS(st.remainingSec) : fmtHMS(st.elapsedSec);
+      const lr = store.getLiveRatio(nowDay, new Date());
+      if (lr.hasWake) {
+        const aEl = document.getElementById('live-awake-badge');
+        const lEl = document.getElementById('lq-learn');
+        const pEl = document.getElementById('lq-prod');
+        const bEl = document.getElementById('lq-both');
+        if (aEl) aEl.textContent = `Wach: ${fmtMin(lr.span.elapsedMin)}`;
+        if (lEl) lEl.textContent = `${lr.learnPct.toFixed(1)} %`;
+        if (pEl) pEl.textContent = `${lr.prodPct.toFixed(1)} %`;
+        if (bEl) bEl.textContent = `${lr.bothPct.toFixed(1)} %`;
+      }
+      scheduleTick();
+    }, delayMs);
+  };
+  scheduleTick();
 }
 
 export function cleanupTodayView() {
   if (activeTimerTick) {
-    clearInterval(activeTimerTick);
+    clearTimeout(activeTimerTick);
     activeTimerTick = null;
   }
 }

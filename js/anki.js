@@ -1,6 +1,6 @@
 // AnkiConnect client (http://127.0.0.1:8765) + Weighted Card-Type Time Model (Blue=New, Red=Learn, Green=Review) + Option B fallback
 
-import { store, toDateStr, toTimeStr } from './store.js';
+import { store, toDateStr, toTimeStr, filterLeafAnkiDecks } from './store.js';
 
 async function ankiInvoke(action, params = {}, url = null) {
   const endpoint = (url || store.state.anki.url || 'http://127.0.0.1:8765').trim();
@@ -128,10 +128,17 @@ export function toggleExcludedAnkiDeck(deckKey) {
   const clean = String(deckKey || '').trim();
   if (!clean) return;
   if (!Array.isArray(store.state.anki.excludedDecks)) store.state.anki.excludedDecks = [];
+  if (!store.state.anki.excludedMeta || typeof store.state.anki.excludedMeta !== 'object') store.state.anki.excludedMeta = {};
   const idx = store.state.anki.excludedDecks.indexOf(clean);
-  if (idx >= 0) store.state.anki.excludedDecks.splice(idx, 1);
-  else store.state.anki.excludedDecks.push(clean);
-  store.state.anki.updatedAt = Date.now();
+  const nowTs = Date.now();
+  if (idx >= 0) {
+    store.state.anki.excludedDecks.splice(idx, 1);
+    store.state.anki.excludedMeta[clean] = { excluded: false, ts: nowTs };
+  } else {
+    store.state.anki.excludedDecks.push(clean);
+    store.state.anki.excludedMeta[clean] = { excluded: true, ts: nowTs };
+  }
+  store.state.anki.updatedAt = nowTs;
   store.save();
 }
 
@@ -151,6 +158,7 @@ export function getAnkiLoadSummary() {
     const estMinutes = estimateAnkiMinutes({ newCards: totalNew, learnCards: totalLearn, reviewCards: totalReview });
     return {
       source: 'manual',
+      lastSyncAt: anki.lastSyncAt || 0,
       totalNew,
       totalLearn,
       totalReview,
@@ -164,16 +172,7 @@ export function getAnkiLoadSummary() {
 
   // Safety net: guard against parent::child overlap AND honor manually excluded decks (e.g. "Studium" or "Spanisch")
   const excludedSet = new Set(Array.isArray(anki.excludedDecks) ? anki.excludedDecks : []);
-  const fullPaths = new Set(anki.decks.map((d) => d.fullName || d.name));
-  const leafDecks = anki.decks.filter((d) => {
-    const path = d.fullName || d.name;
-    if (excludedSet.has(path) || excludedSet.has(d.name)) return false;
-    const prefix = `${path}::`;
-    for (const other of fullPaths) {
-      if (other.startsWith(prefix)) return false;
-    }
-    return true;
-  });
+  const leafDecks = filterLeafAnkiDecks(anki.decks, anki.excludedDecks);
 
   const totalNew = leafDecks.reduce((s, d) => s + (d.newCards || 0), 0);
   const totalLearn = leafDecks.reduce((s, d) => s + (d.learnCards || 0), 0);
@@ -184,6 +183,7 @@ export function getAnkiLoadSummary() {
 
   return {
     source: 'ankiconnect',
+    lastSyncAt: anki.lastSyncAt || 0,
     totalNew,
     totalLearn,
     totalReview,

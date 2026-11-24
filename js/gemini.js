@@ -12,7 +12,9 @@ import {
   timeToMin,
   minToTime,
   WEEKDAYS_DE,
-  parseDateStr
+  parseDateStr,
+  isValidIsoDate,
+  isValidTimeStr
 } from './store.js';
 import { getAnkiLoadSummary } from './anki.js';
 import {
@@ -32,7 +34,41 @@ export const AVAILABLE_MODELS = [
   { id: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro Preview' }
 ];
 
-const FALLBACK_CHAIN = ['gemini-3.8-flash', 'gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-2.5-flash', 'gemini-flash-latest'];
+const FALLBACK_CHAIN = ['gemini-3.8-flash', 'gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-2.5-flash', 'gemini-flash-latest', 'gemini-pro-latest'];
+const deadModelsSession = new Set();
+
+function extractAllJsonBlocks(text) {
+  if (!text) return [];
+  const blocks = [];
+  const re = /```(?:json)?\s*([\s\S]*?)```/gi;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    const candidate = (m[1] || '').trim();
+    if (candidate.startsWith('{') && candidate.endsWith('}')) {
+      blocks.push(candidate);
+    }
+  }
+  if (!blocks.length) {
+    const trimmed = text.trim();
+    if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+      blocks.push(trimmed);
+    } else {
+      const first = trimmed.indexOf('{');
+      const last = trimmed.lastIndexOf('}');
+      if (first >= 0 && last > first) blocks.push(trimmed.slice(first, last + 1));
+    }
+  }
+  return blocks;
+}
+
+function isDailyAnkiReviewDuplicate(it) {
+  const title = String(it?.title || '').trim();
+  const isCreation = /erstellen|nachholen|schreiben|anlegen|neue.*karte/i.test(title);
+  if (isCreation) return false;
+  if (it?.kind === 'a') return true;
+  if (/^\s*(?:tägliche?\s+)?anki(?:[\s-]*reviews?)?(?:\s*\([^)]*\))?\s*$/i.test(title)) return true;
+  return false;
+}
 
 export function buildPlanningContext(weekOffset = 0) {
   const now = new Date();
@@ -53,7 +89,7 @@ export function buildPlanningContext(weekOffset = 0) {
   const todayAnkiRemainingMin = ankiDoneToday
     ? 0
     : (anki.totalDue > 0
-        ? Math.max(0, Math.min(anki.estMinutes, Math.max(minDailyAnki, anki.estMinutes)) - todayBreak.a)
+        ? Math.max(0, Math.min(minDailyAnki, anki.estMinutes) - todayBreak.a)
         : (todayBreak.a > 0 || ankiSyncedToday ? 0 : minDailyAnki));
 
   const prefs = store.state.planningPrefs || {};
@@ -176,11 +212,12 @@ export function buildPlanningContext(weekOffset = 0) {
     })),
     lernHistorieFuerKI: {
       letzteLernSessions: calibration.recentSessions,
-      echteDurchschnittszeitenProFach: calibration.byModule.map((x) => ({
+      echteP75ZeitenProFach: calibration.byModule.map((x) => ({
         fach: x.fach,
         taetigkeit: x.taetigkeit,
         anzahlSessions: x.anzahl,
-        echterDurchschnittMin: x.durchschnittMin,
+        p75ZielMin: x.p75Min,
+        echterSchnittMin: x.echterSchnittMin,
         hinterlegteRegelMin: x.regelMin
       }))
     },
@@ -210,6 +247,7 @@ export function buildPlanningContext(weekOffset = 0) {
       startWertMin: c.defaultMin,
       echteSessions: c.sampleCount,
       automatischKalibriert: c.calibrated,
+      kalibrierungsModus: c.calibrated ? 'P75 (oberes Ende gegen Zeitdruck)' : 'Startwert',
       notiz: c.notes
     })),
     uniTermineDieseWoche: weekUni,
@@ -251,9 +289,10 @@ Halte dich strikt an diese 7 Regeln und nutze jedes Feld aus dem JSON-Kontext ge
    - Falls "weicheRhythmusOrientierung" gefüllt ist, nutze sie als lockere, flexible Leitlinie (niemals starr, wenn aktuelle Termine oder Energie dagegen sprechen).
 
 4. VORLESUNGEN, ÜBUNGEN, VIDEOS & HAUSAUFGABEN (uniTermineDieseWoche & modulRegeln):
-   - "terminTyp: exercise" oder "workshop": KEINE Nacharbeit / keine Ankis nötig!
-   - "terminTyp: lecture" + "attendance: live": Student besucht die Vorlesung (wird automatisch als Vorlesungszeit verbucht). Wenn "liveReviewMinutes > 0" oder "createsAnki: true", plane zeitnah einen Nacharbeits-/Anki-Block ein (~liveReviewMinutes, typ. 60–90 Min.).
-   - "attendance: video": Student geht NICHT hin -> Terminzeit ist frei! Plane stattdessen das Nachschauen & Durcharbeiten (~videoStudyMinutes, z. B. 150–180 Min.) in ein passendes Zeitfenster.
+   - Richte dich IMMER exakt nach den Werten "liveReviewMinutes", "videoStudyMinutes" und "createsAnki" in "uniTermineDieseWoche" / "modulRegeln" — auch bei Übungen!
+   - "terminTyp: exercise" oder "workshop": Wenn "liveReviewMinutes: 0" und "createsAnki: false", ist KEINE Nacharbeit nötig. Wenn der Student aber explizit "liveReviewMinutes > 0" (z. B. 45 Min. bei HM I (Ü)) eingestellt hat, plane diese Nacharbeit ZWINGEND mit ein!
+   - "attendance: live": Student besucht den Termin (wird automatisch als Vorlesungszeit verbucht). Wenn "liveReviewMinutes > 0" oder "createsAnki: true", plane zeitnah einen Nacharbeits-Block (~liveReviewMinutes) ein.
+   - "attendance: video": Student geht NICHT hin -> Terminzeit ist frei! Plane stattdessen das Nachschauen & Durcharbeiten (~videoStudyMinutes bzw. aus "aufgabenKatalog") in ein passendes Zeitfenster.
    - Wenn "triggersHomework: true": Nach dieser Übung fällt eine neue Hausaufgabe an. Bei "homeworkMode: understanding" gilt: reine Verständnis-Bearbeitung OHNE harte Abgabe-Panik (andere geben ab) – entspannt in den nächsten Tagen als eigenen Checklisten-Punkt einplanen.
 
 5. AUFGABEN-KATALOG & SELBST-KALIBRIERUNG (aufgabenKatalog):
@@ -265,7 +304,7 @@ Halte dich strikt an diese 7 Regeln und nutze jedes Feld aus dem JSON-Kontext ge
    - Plane Punkte aus "offenerRueckstand" (Status "open" oder "overdue") sinnvoll mit ein und gib bei diesen Punkten EXAKT deren "backlogId" aus dem JSON zurück!
    - Erfinde NIEMALS eine "backlogId", die nicht in "offenerRueckstand" oder "eingeplanterRueckstand" steht (sonst "backlogId": "").
    - Punkte in "eingeplanterRueckstand" NICHT doppelt einplanen, außer du ersetzt ihren bisherigen Tag über "replaceDates".
-   - Nutze "lernHistorieFuerKI.letzteLernSessions" (was konkret zuletzt gelernt wurde), "echteDurchschnittszeitenProFach", "fokusStatistik.kapazitaetNachUniLast" (echte Kapazität an freien vs. vollen Uni-Tagen) und "fachBalance" (vernachlässigte Fächer gezielt ausgleichen), um Blocklängen und Fach-Prioritäten realistisch anzusetzen.
+   - Nutze "lernHistorieFuerKI.letzteLernSessions" (was konkret zuletzt gelernt wurde), "echteP75ZeitenProFach" (oberes Ende gegen Zeitdruck), "fokusStatistik.kapazitaetNachUniLast" (echte Kapazität an freien vs. vollen Uni-Tagen) und "fachBalance" (vernachlässigte Fächer gezielt ausgleichen), um Blocklängen und Fach-Prioritäten realistisch anzusetzen.
 
 7. FORMAT & ZEIT-HINWEISE:
    - Nutze "timeLabel" nur dort, wo Lücken zwischen Uni-Terminen oder Startzeiten sinnvoll sind (z. B. "10:45", "Ab 15:30", "11:15–14:00"), sonst "" lassen.
@@ -298,16 +337,46 @@ Wichtig: Übernimm existierende "vorgemerkteTermine" nicht doppelt in "reminders
 
 export function extractProposalFromReply(text) {
   if (!text) return null;
-  const match = /```json\s*([\s\S]*?)```/i.exec(text) || /```\s*(\{[\s\S]*?\})\s*```/i.exec(text);
-  let jsonStr = match ? match[1] : null;
-  if (!jsonStr) {
-    const trimmed = text.trim();
-    if (trimmed.startsWith('{') && trimmed.endsWith('}')) jsonStr = trimmed;
-  }
+  const jsonBlocks = extractAllJsonBlocks(text);
 
-  if (jsonStr) {
-    try {
-      const parsed = JSON.parse(jsonStr);
+  if (jsonBlocks.length) {
+    let summary = '';
+    const replaceDatesSet = new Set();
+    const dayNotes = {};
+    const items = [];
+    const reminders = [];
+    const newCatalogItems = [];
+    let suggestedRhythm = '';
+    let filteredAnkiCount = 0;
+    let rejectedDateCount = 0;
+    let parsedAny = false;
+
+    for (const jsonStr of jsonBlocks) {
+      let parsed;
+      try { parsed = JSON.parse(jsonStr); } catch { continue; }
+      if (!parsed || typeof parsed !== 'object') continue;
+      parsedAny = true;
+
+      if (parsed.summary && !summary) summary = String(parsed.summary).trim();
+      if (parsed.suggestedRhythmNote && !suggestedRhythm) {
+        suggestedRhythm = String(parsed.suggestedRhythmNote).trim();
+      }
+
+      if (Array.isArray(parsed.replaceDates)) {
+        for (const d of parsed.replaceDates) {
+          const ds = String(d || '').slice(0, 10);
+          if (isValidIsoDate(ds)) replaceDatesSet.add(ds);
+          else if (ds) rejectedDateCount++;
+        }
+      }
+
+      if (parsed.dayNotes && typeof parsed.dayNotes === 'object') {
+        for (const [d, note] of Object.entries(parsed.dayNotes)) {
+          const ds = String(d || '').slice(0, 10);
+          if (isValidIsoDate(ds) && note) dayNotes[ds] = String(note).trim();
+        }
+      }
+
       const rawItems = Array.isArray(parsed.items)
         ? parsed.items
         : Array.isArray(parsed.blocks)
@@ -322,69 +391,93 @@ export function extractProposalFromReply(text) {
             }))
           : [];
 
-      const items = rawItems
-        .filter((it) => it && it.d && it.title)
-        .map((it) => ({
-          d: String(it.d).slice(0, 10),
+      for (const it of rawItems) {
+        if (!it || !it.title) continue;
+        const dStr = String(it.d || '').slice(0, 10);
+        if (!isValidIsoDate(dStr)) {
+          rejectedDateCount++;
+          continue;
+        }
+        const normalized = {
+          d: dStr,
           timeLabel: String(it.timeLabel || '').trim(),
           title: String(it.title).trim(),
           kind: ['l', 'a', 'p'].includes(it.kind) ? it.kind : (/\banki/i.test(it.title) ? 'a' : 'l'),
           estMin: Math.max(0, Number(it.estMin) || 0),
           catalogId: String(it.catalogId || '').trim(),
           backlogId: String(it.backlogId || '').trim()
-        }));
+        };
+        if (isDailyAnkiReviewDuplicate(normalized)) {
+          filteredAnkiCount++;
+          continue;
+        }
+        items.push(normalized);
+      }
 
-      const reminders = Array.isArray(parsed.reminders)
-        ? parsed.reminders.map((r) => (typeof r === 'string' ? r.trim() : String(r?.text || '').trim())).filter(Boolean)
-        : [];
+      if (Array.isArray(parsed.reminders)) {
+        for (const r of parsed.reminders) {
+          const txt = typeof r === 'string' ? r.trim() : String(r?.text || '').trim();
+          if (txt) reminders.push(txt);
+        }
+      }
 
-      const newCatalogItems = Array.isArray(parsed.newCatalogItems)
-        ? parsed.newCatalogItems
-            .filter((c) => c && c.title)
-            .map((c) => ({
-              subject: String(c.subject || c.fach || 'Allgemein').trim(),
-              title: String(c.title).trim(),
-              act: ['video', 'review', 'homework', 'exam', ''].includes(c.act) ? c.act : '',
-              kind: ['l', 'p'].includes(c.kind) ? c.kind : 'l',
-              defaultMin: Math.max(10, Math.min(480, Math.round(Number(c.defaultMin || c.estMin) || 60))),
-              notes: String(c.notes || c.notiz || '').trim()
-            }))
-        : [];
+      if (Array.isArray(parsed.newCatalogItems)) {
+        for (const c of parsed.newCatalogItems) {
+          if (!c || !c.title) continue;
+          newCatalogItems.push({
+            subject: String(c.subject || c.fach || 'Allgemein').trim(),
+            title: String(c.title).trim(),
+            act: ['video', 'review', 'homework', 'exam', ''].includes(c.act) ? c.act : '',
+            kind: ['l', 'p'].includes(c.kind) ? c.kind : 'l',
+            defaultMin: Math.max(10, Math.min(480, Math.round(Number(c.defaultMin || c.estMin) || 60))),
+            notes: String(c.notes || c.notiz || '').trim()
+          });
+        }
+      }
+    }
 
-      const suggestedRhythm = String(parsed.suggestedRhythmNote || '').trim();
-
-      if (!items.length && !reminders.length && !newCatalogItems.length && !suggestedRhythm) return null;
+    if (parsedAny && (items.length || reminders.length || newCatalogItems.length || suggestedRhythm || replaceDatesSet.size)) {
       return {
-        summary: parsed.summary || (suggestedRhythm && !items.length ? 'Wochenrückblick & Rhythmus' : 'Uni-Plan Checkliste'),
-        replaceDates: Array.isArray(parsed.replaceDates) ? parsed.replaceDates : [],
-        dayNotes: parsed.dayNotes && typeof parsed.dayNotes === 'object' ? parsed.dayNotes : {},
+        summary: summary || (suggestedRhythm && !items.length ? 'Wochenrückblick & Rhythmus' : 'Uni-Plan Checkliste'),
+        replaceDates: Array.from(replaceDatesSet),
+        dayNotes,
         items,
         reminders,
         newCatalogItems,
-        suggestedRhythm
+        suggestedRhythm,
+        filteredAnkiCount,
+        rejectedDateCount
       };
-    } catch {
-      // Fall through to plain-text parser
     }
   }
 
   const textParsed = parseTextChecklistPlan(text);
-  if (textParsed.items.length || textParsed.reminders.length) {
+  const validTextItems = [];
+  let filteredAnkiCount = 0;
+  let rejectedDateCount = 0;
+  for (const it of (textParsed.items || [])) {
+    if (!isValidIsoDate(it.d)) { rejectedDateCount++; continue; }
+    if (isDailyAnkiReviewDuplicate(it)) { filteredAnkiCount++; continue; }
+    validTextItems.push(it);
+  }
+  if (validTextItems.length || textParsed.reminders.length) {
     return {
       summary: 'Erkannter Checklisten-Plan',
       replaceDates: [],
       dayNotes: textParsed.dayNotes,
-      items: textParsed.items,
+      items: validTextItems,
       reminders: textParsed.reminders.map((r) => r.text),
       newCatalogItems: [],
-      suggestedRhythm: ''
+      suggestedRhythm: '',
+      filteredAnkiCount,
+      rejectedDateCount
     };
   }
   return null;
 }
 
 export function stripJsonBlock(text) {
-  return (text || '').replace(/```json[\s\S]*?```/gi, '').trim();
+  return (text || '').replace(/```json[\s\S]*?```/gi, '').replace(/```\s*\{[\s\S]*?\}\s*```/gi, '').trim();
 }
 
 export function buildAuditInstruction() {
@@ -394,7 +487,7 @@ export function buildAuditInstruction() {
 SPEZIAL-MODUS: STRENGER KONTROLLEUR (PLAN-AUDIT)
 Prüfe "aktuelleCheckliste" zusammen mit "uniTermineDieseWoche", "offenerRueckstand", "tagesRhythmus", "ankiStatus" und "lernHistorieFuerKI" mit kritischem Blick:
 1. Harte Fehler: Überschneidungen mit Live-Uni-Terminen, Zeitfenster auf "heute" vor "aktuelleUhrzeit", Start vor "fruehesterLernstartFreieTage", oder vergessene offene/überfällige Rückstände.
-2. Überlastungs-Fallen: Wurde das tägliche Anki-Zeitbudget (heute: "heuteNochOffenBerechnetMin", Folgetage: "taeglicherZeitpufferFolgetageMin") im Tagesbudget mitgedacht (ohne eigene Anki-Review-Todos in "items" zu erzeugen)? Tage mit zu vielen schweren Nacharbeiten auf einmal, fehlende Pausen bei langen Uni-Tagen, verplanter Sonntag (falls "sonntagFreiAusserAnki" true), oder unrealistische Zeiten im Vergleich zu "echteDurchschnittszeitenProFach".
+2. Überlastungs-Fallen: Wurde das tägliche Anki-Zeitbudget (heute: "heuteNochOffenBerechnetMin", Folgetage: "taeglicherZeitpufferFolgetageMin") im Tagesbudget mitgedacht (ohne eigene Anki-Review-Todos in "items" zu erzeugen)? Tage mit zu vielen schweren Nacharbeiten auf einmal, fehlende Pausen bei langen Uni-Tagen, verplanter Sonntag (falls "sonntagFreiAusserAnki" true), oder unrealistische Zeiten im Vergleich zu "echteP75ZeitenProFach".
 3. Formuliere zuerst maximal 5 knappe, direkte Kritikpunkte (ohne Emojis, klar nummeriert).
 4. Hänge danach DIREKT den korrigierten JSON-Planblock im exakt vorgegebenen Format an (mit "summary": "Korrigierter Plan nach Audit" und passenden "replaceDates"), damit der Student alle Schwachstellen mit 1 Klick fixen kann.`;
 }
@@ -466,7 +559,7 @@ export function buildWeeklyReviewInstruction() {
   return `Du bist ein ruhiger, ehrlicher Studien-Coach für einen Maschinenbau-Studenten am KIT.
 Antworte auf Deutsch, ohne Emojis, direkt und konstruktiv.
 
-Aufgabe: Erstelle einen kurzen, nützlichen Wochenrückblick auf Basis der letzten 7 Tage (Checkliste, "letzteLernSessions", "echteDurchschnittszeitenProFach", Belastung und aktuelle "weicheRhythmusOrientierung"):
+Aufgabe: Erstelle einen kurzen, nützlichen Wochenrückblick auf Basis der letzten 7 Tage (Checkliste, "letzteLernSessions", "echteP75ZeitenProFach", Belastung und aktuelle "weicheRhythmusOrientierung"):
 1. Gib exakt 4–5 knappe Stichpunkte:
    - Was lief richtig gut?
    - Was blieb liegen oder hat deutlich länger gedauert als gedacht?
@@ -495,14 +588,14 @@ Gib mir meinen kurzen Wochenrückblick und schlag mir 1–2 lockere Rhythmus-Anp
 
 export function extractRhythmSuggestion(text) {
   if (!text) return '';
-  const match = /```json\s*([\s\S]*?)```/i.exec(text);
-  if (!match) return '';
-  try {
-    const parsed = JSON.parse(match[1]);
-    return String(parsed?.suggestedRhythmNote || '').trim();
-  } catch {
-    return '';
+  for (const jsonStr of extractAllJsonBlocks(text)) {
+    try {
+      const parsed = JSON.parse(jsonStr);
+      const note = String(parsed?.suggestedRhythmNote || '').trim();
+      if (note) return note;
+    } catch { /* try next JSON block */ }
   }
+  return '';
 }
 
 export async function runWeeklyReview(weekOffset = 0) {
@@ -583,20 +676,63 @@ Ich hänge dir jetzt das Bild / den Screenshot meines Semesterplans an. Lies bit
 export function parseSemesterScanReply(rawText, modelUsed = 'Gemini Pro (Bridge)') {
   const txt = String(rawText || '').trim();
   if (!txt) throw new Error('Bitte zuerst die JSON-Antwort von Gemini einfügen.');
-  const match = /```json\s*([\s\S]*?)```/i.exec(txt) || /```\s*(\{[\s\S]*?\})\s*```/i.exec(txt);
-  let jsonStr = match ? match[1] : txt;
-  if (!jsonStr.trim().startsWith('{')) {
-    const first = jsonStr.indexOf('{');
-    const last = jsonStr.lastIndexOf('}');
-    if (first >= 0 && last > first) jsonStr = jsonStr.slice(first, last + 1);
+  const blocks = extractAllJsonBlocks(txt);
+  let parsed = null;
+  for (const b of blocks) {
+    try {
+      const cand = JSON.parse(b);
+      if (cand && typeof cand === 'object') { parsed = cand; break; }
+    } catch { /* try next */ }
   }
-  const parsed = JSON.parse(jsonStr);
-  if (!parsed || typeof parsed !== 'object') throw new Error('Kein gültiges JSON erkannt.');
+  if (!parsed) throw new Error('Kein gültiges JSON erkannt.');
+
+  let rejectedCount = 0;
+  const overrides = [];
+  for (const o of (Array.isArray(parsed.overrides) ? parsed.overrides : [])) {
+    const dStr = String(o?.d || '').slice(0, 10);
+    const type = String(o?.overrideType || '').trim();
+    if (!isValidIsoDate(dStr) || !['exercise', 'lecture', 'cancelled'].includes(type)) {
+      rejectedCount++;
+      continue;
+    }
+    overrides.push({
+      d: dStr,
+      matchModule: String(o.matchModule || '').trim(),
+      overrideType: type,
+      label: String(o.label || '').trim()
+    });
+  }
+
+  const customEvents = [];
+  for (const ev of (Array.isArray(parsed.customEvents) ? parsed.customEvents : [])) {
+    const title = String(ev?.title || '').trim();
+    const dStr = String(ev?.date || '').slice(0, 10);
+    if (!title || !isValidIsoDate(dStr)) {
+      rejectedCount++;
+      continue;
+    }
+    const start = isValidTimeStr(ev.start) ? ev.start.trim() : '14:00';
+    const end = isValidTimeStr(ev.end) ? ev.end.trim() : '15:30';
+    customEvents.push({
+      title,
+      date: dStr,
+      start,
+      end,
+      eventType: ['lecture', 'exercise', 'workshop'].includes(ev.eventType) ? ev.eventType : 'workshop',
+      location: String(ev.location || '').trim()
+    });
+  }
+
+  const reminders = Array.isArray(parsed.reminders)
+    ? parsed.reminders.map((r) => String(typeof r === 'string' ? r : r?.text || '').trim()).filter(Boolean)
+    : [];
+
   return {
     summary: parsed.summary || 'Semesterplan erkannt',
-    overrides: Array.isArray(parsed.overrides) ? parsed.overrides : [],
-    customEvents: Array.isArray(parsed.customEvents) ? parsed.customEvents : [],
-    reminders: Array.isArray(parsed.reminders) ? parsed.reminders : [],
+    overrides,
+    customEvents,
+    reminders,
+    rejectedCount,
     modelUsed
   };
 }
@@ -642,7 +778,7 @@ ${userRequest || 'Erstelle mir bitte meine Uni-Plan Checkliste für diese Woche 
 
 async function callGeminiModel({ apiKey, model, contents, systemInstruction }) {
   const cleanKey = (apiKey || '').replace(/\s+/g, '');
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(cleanKey)}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
   const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
   const timer = ctrl ? setTimeout(() => ctrl.abort(), 45000) : null;
 
@@ -652,7 +788,10 @@ async function callGeminiModel({ apiKey, model, contents, systemInstruction }) {
       method: 'POST',
       mode: 'cors',
       cache: 'no-store',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'x-goog-api-key': cleanKey
+      },
       signal: ctrl?.signal,
       body: JSON.stringify({
         system_instruction: { parts: [{ text: systemInstruction }] },
@@ -690,21 +829,37 @@ async function callGeminiModel({ apiKey, model, contents, systemInstruction }) {
 }
 
 async function callGeminiWithFallback({ apiKey, preferred, contents, systemInstruction }) {
-  const tryModels = [preferred, ...FALLBACK_CHAIN.filter((m) => m !== preferred)];
+  const cachedWorking = store.state.ai?.lastWorkingModel || '';
+  const ordered = [];
+  const addCandidate = (m) => {
+    if (m && !ordered.includes(m) && !deadModelsSession.has(m)) ordered.push(m);
+  };
+  // Try user's preferred model first (unless known 404 in this session), then cached working model, then fallback chain
+  addCandidate(preferred);
+  addCandidate(cachedWorking);
+  for (const m of FALLBACK_CHAIN) addCandidate(m);
+  if (!ordered.length) ordered.push(preferred || 'gemini-2.5-flash');
+
   let lastErr = null;
   let allNetworkErrors = true;
 
-  for (let i = 0; i < tryModels.length; i++) {
-    const model = tryModels[i];
+  for (let i = 0; i < ordered.length; i++) {
+    const model = ordered[i];
     try {
-      return await callGeminiModel({ apiKey, model, contents, systemInstruction });
+      const res = await callGeminiModel({ apiKey, model, contents, systemInstruction });
+      if (store.state.ai && store.state.ai.lastWorkingModel !== model) {
+        store.state.ai.lastWorkingModel = model;
+        store.save({ skipSync: true, silent: true, preserveTimestamp: true });
+      }
+      return res;
     } catch (err) {
       lastErr = err;
       if (!err.isNetworkError) allNetworkErrors = false;
+      if (err.status === 404) deadModelsSession.add(model);
       const retryable = err.isNetworkError || [404, 429, 500, 503].includes(err.status);
       if (!retryable) throw err;
       // Short pause before next fallback attempt
-      if (i < tryModels.length - 1) {
+      if (i < ordered.length - 1) {
         await new Promise((r) => setTimeout(r, err.isNetworkError ? 450 : 250));
       }
     }
@@ -724,10 +879,26 @@ export async function sendPlannerMessage(userText, weekOffset = 0) {
 
   const ctx = buildPlanningContext(weekOffset);
   const sys = buildSystemInstruction();
-  const recentHistory = (store.state.ai.chat || []).slice(-6).map((m) => ({
-    role: m.role === 'user' ? 'user' : 'model',
-    parts: [{ text: m.text }]
-  }));
+
+  // Exclude the just-pushed current user message so we NEVER send two consecutive role:'user' turns!
+  const rawChat = [...(store.state.ai.chat || [])];
+  if (rawChat.length && rawChat[rawChat.length - 1]?.role === 'user' && rawChat[rawChat.length - 1]?.text === userText) {
+    rawChat.pop();
+  }
+  const recentHistory = [];
+  for (const m of rawChat.slice(-6)) {
+    if (!m || !m.text) continue;
+    const role = m.role === 'user' ? 'user' : 'model';
+    if (recentHistory.length && recentHistory[recentHistory.length - 1].role === role) {
+      recentHistory[recentHistory.length - 1].parts[0].text += `\n\n${m.text}`;
+    } else {
+      recentHistory.push({ role, parts: [{ text: m.text }] });
+    }
+  }
+  // Ensure history ends on 'model' (not 'user') before appending the new user turn
+  while (recentHistory.length && recentHistory[recentHistory.length - 1].role === 'user') {
+    recentHistory.pop();
+  }
 
   const currentUserPayload = `Aktueller Kontext:\n${JSON.stringify(ctx)}\n\nNachricht:\n${userText}`;
   const contents = [...recentHistory, { role: 'user', parts: [{ text: currentUserPayload }] }];

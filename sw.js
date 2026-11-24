@@ -1,4 +1,4 @@
-const CACHE_NAME = 'kit-studyflow-v14';
+const CACHE_NAME = 'kit-studyflow-v17';
 const ASSETS = [
   './',
   './index.html',
@@ -54,6 +54,6 @@ self.addEventListener('fetch', (event) => {
         }
         return res;
       })
-      .catch(() => caches.match(event.request))
+      .catch(() => caches.match(event.request, { ignoreSearch: true }).then((hit) => hit || (event.request.mode === 'navigate' ? caches.match('./index.html', { ignoreSearch: true }) : undefined)))
   );
 });
