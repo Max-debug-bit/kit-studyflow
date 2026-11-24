@@ -19,6 +19,24 @@ export const LEVELS = [
 export const WEEKDAYS_DE = ['So', 'Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa'];
 export const WEEKDAYS_MON = ['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So'];
 
+export const DEFAULT_TASK_CATALOG = [
+  { id: 'cat_hm_video', subject: 'HM I', title: 'HM: VL-Video durcharbeiten (inkl. Pausieren)', act: 'video', kind: 'l', defaultMin: 110, notes: 'Video-Modus, ohne Ankis', source: 'default' },
+  { id: 'cat_hm_ha', subject: 'HM I', title: 'HM: Hausaufgabe / Übungsblatt (Verständnis)', act: 'homework', kind: 'l', defaultMin: 120, notes: 'Ohne Abgabedruck', source: 'default' },
+  { id: 'cat_hm_ueb', subject: 'HM I', title: 'HM: Übung nacharbeiten / Aufgaben rechnen', act: 'exam', kind: 'l', defaultMin: 60, notes: 'Falls in Übung was offen blieb', source: 'default' },
+  { id: 'cat_tm_vl', subject: 'TM I', title: 'TM: VL nacharbeiten + Ankis erstellen', act: 'review', kind: 'l', defaultMin: 45, notes: 'Nach Live-VL', source: 'default' },
+  { id: 'cat_tm_ha', subject: 'TM I', title: 'TM: Hausaufgabe / Aufgabenblatt (Verständnis)', act: 'homework', kind: 'l', defaultMin: 120, notes: 'Ohne Abgabedruck', source: 'default' },
+  { id: 'cat_tm_tut', subject: 'TM I', title: 'TM: Tutorium / Aufgaben nachrechnen', act: 'exam', kind: 'l', defaultMin: 60, notes: 'Aktiv rechnen', source: 'default' },
+  { id: 'cat_mkl_vl', subject: 'MKL A', title: 'MKL: VL nacharbeiten + Ankis erstellen', act: 'review', kind: 'l', defaultMin: 75, notes: 'Nur nach Live-VL', source: 'default' },
+  { id: 'cat_mkl_praxis', subject: 'MKL A', title: 'MKL: Zeichnen / Skizzieren / Workshop-Vorbereitung', act: 'homework', kind: 'l', defaultMin: 90, notes: 'Praxis / Konstruktion', source: 'default' },
+  { id: 'cat_wk_vl', subject: 'WK I', title: 'WK: VL nacharbeiten + Ankis erstellen', act: 'review', kind: 'l', defaultMin: 75, notes: 'Folien + Karten', source: 'default' },
+  { id: 'cat_ft_vl', subject: 'FT', title: 'FT: VL nacharbeiten + Ankis erstellen', act: 'review', kind: 'l', defaultMin: 60, notes: 'Folien + Karten', source: 'default' },
+  { id: 'cat_anki_create', subject: 'Anki', title: 'Ankis nachholen / erstellen (eine Runde)', act: 'review', kind: 'l', defaultMin: 45, notes: 'Karten schreiben (Reviews laufen dynamisch)', source: 'default' },
+  { id: 'cat_exam', subject: 'Klausur', title: 'Altklausur / Übungsblock rechnen', act: 'exam', kind: 'l', defaultMin: 90, notes: 'Aktives Üben', source: 'default' },
+  { id: 'cat_summary', subject: 'Klausur', title: 'Zusammenfassung / Formelsammlung schreiben', act: 'review', kind: 'l', defaultMin: 60, notes: 'Überblick bauen', source: 'default' },
+  { id: 'cat_reset', subject: 'Orga', title: 'Einstieg / Folien sichten / Orga', act: '', kind: 'l', defaultMin: 30, notes: 'Niedrige Hürde an müden Tagen', source: 'default' },
+  { id: 'cat_spanish', subject: 'Sprache', title: 'Spanisch lernen', act: '', kind: 'l', defaultMin: 30, notes: 'Optional', source: 'default' }
+];
+
 export function pad2(n) {
   return String(Math.floor(n)).padStart(2, '0');
 }
@@ -138,6 +156,8 @@ export function createDefaultState() {
     reminders: [],         // { id, text, date?, done }
     planBlocks: [],        // Legacy / optional calendar blocks
     tasks: [],             // Assignments / Deadlines
+    taskCatalog: DEFAULT_TASK_CATALOG.map((x) => ({ ...x, updatedAt: 0 })), // Editable & auto-calibrating task blueprints for AI & user
+    taskCatalogSeeded: true,
     anki: {
       mode: 'auto', // 'auto' | 'manual'
       url: 'http://127.0.0.1:8765',
@@ -271,7 +291,15 @@ class Store {
       checklist: Array.isArray(data.checklist) ? data.checklist : [],
       reminders: Array.isArray(data.reminders) ? data.reminders : [],
       planBlocks: Array.isArray(data.planBlocks) ? data.planBlocks : [],
-      tasks: Array.isArray(data.tasks) ? data.tasks : []
+      tasks: Array.isArray(data.tasks) ? data.tasks : [],
+      taskCatalog: Array.isArray(data.taskCatalog) && data.taskCatalog.length > 0
+        ? data.taskCatalog
+        : data.taskCatalogSeeded
+          ? (Array.isArray(data.taskCatalog) ? data.taskCatalog : [])
+          : DEFAULT_TASK_CATALOG
+              .filter((x) => !data.deletedIds?.[x.id])
+              .map((x) => ({ ...x, updatedAt: 0 })),
+      taskCatalogSeeded: true
     };
     return this._migrateState(merged, Number(data?.schemaVersion || 1));
   }
@@ -444,7 +472,7 @@ class Store {
     }
   }
 
-  addEntry({ d, t, m, k, mod = '', act = '', note = '', sessionMin = 0 }) {
+  addEntry({ d, t, m, k, mod = '', act = '', note = '', sessionMin = 0, catalogId = '' }) {
     const minutes = Math.round(Number(m) || 0);
     if (minutes <= 0) return { ok: false, message: 'Bitte mindestens 1 Minute eingeben.' };
     const dateStr = d || toDateStr();
@@ -458,6 +486,7 @@ class Store {
       else realBlockMin = minutes > before[k || 'l'] ? minutes - before[k || 'l'] : minutes;
     }
 
+    const resolvedCatalogId = catalogId || (k !== 'p' ? (this.matchCatalogItemForText(note, act, mod)?.id || '') : '');
     const entry = {
       id: Date.now() + Math.floor(Math.random() * 100),
       d: dateStr,
@@ -468,8 +497,9 @@ class Store {
     };
     if (mod) entry.mod = mod;
     if (act) entry.act = act; // 'video' | 'review' | 'homework' | 'anki' | 'exam' | 'other'
+    if (resolvedCatalogId) entry.catalogId = resolvedCatalogId;
     if (note && note.trim()) entry.note = note.trim();
-    if (realBlockMin > 0 && (mod || act || (note && note.trim()))) entry.blockMin = realBlockMin;
+    if (realBlockMin > 0 && (mod || act || resolvedCatalogId || (note && note.trim()))) entry.blockMin = realBlockMin;
 
     this.state.e.push(entry);
     const after = this.getDayBreakdown(dateStr);
@@ -1128,6 +1158,180 @@ class Store {
     });
 
     return { recentSessions, byModule };
+  }
+
+  // ---------- Self-Calibrating Task Catalog (Bausteine für KI & Nutzer) ----------
+
+  _subjectTagFromText(text = '', modId = '') {
+    const mod = modId ? this.state.modules?.[modId] : null;
+    const hay = `${text || ''} ${mod?.shortName || ''} ${mod?.name || ''} ${mod?.subjectGroup || ''}`.toLowerCase();
+    if (/\bhm\b|höhere math|mathe/.test(hay)) return 'hm';
+    if (/\btm\b|mechanik/.test(hay)) return 'tm';
+    if (/\bmkl\b|konstruktion/.test(hay)) return 'mkl';
+    if (/\bwk\b|werkstoff/.test(hay)) return 'wk';
+    if (/\bft\b|fertigung/.test(hay)) return 'ft';
+    if (/spanisch/.test(hay)) return 'spanisch';
+    if (/altklausur|klausur/.test(hay)) return 'klausur';
+    if (/zusammenfassung|formelsammlung/.test(hay)) return 'summary';
+    if (/anki/.test(hay)) return 'anki';
+    return '';
+  }
+
+  matchCatalogItemForText(title = '', act = '', modId = '') {
+    const catalog = this.state.taskCatalog || [];
+    if (!catalog.length) return null;
+    const lowTitle = String(title || '').toLowerCase().trim();
+    if (!lowTitle && !act && !modId) return null;
+
+    // 1. Exact or very close title match
+    const exact = catalog.find((c) => c.title.toLowerCase() === lowTitle);
+    if (exact) return exact;
+
+    const subjTag = this._subjectTagFromText(lowTitle, modId);
+    const inferredAct = act || (
+      /video|vl-video/.test(lowTitle) ? 'video' :
+      /\bha\b|hausaufgabe|übungsblatt|aufgabenblatt/.test(lowTitle) ? 'homework' :
+      /zeichnen|skizzier|cad|workshop/.test(lowTitle) ? 'homework' :
+      /altklausur|klausur|tutorium|übung.*nacharbeit|aufgaben.*rechnen/.test(lowTitle) ? 'exam' :
+      /nacharbeit|folien|ankis?.*erstellen|ankis?.*nachholen|zusammenfassung|formelsammlung/.test(lowTitle) ? 'review' :
+      ''
+    );
+
+    let best = null;
+    let bestScore = 0;
+
+    for (const c of catalog) {
+      let score = 0;
+      const cSubj = this._subjectTagFromText(`${c.subject} ${c.title}`, '');
+      const cLow = c.title.toLowerCase();
+
+      if (subjTag && cSubj && subjTag === cSubj) score += 5;
+      else if (subjTag && cSubj && subjTag !== cSubj) continue;
+
+      if (inferredAct && c.act && inferredAct === c.act) score += 3;
+      if (lowTitle.includes('video') && cLow.includes('video')) score += 4;
+      if ((lowTitle.includes('hausaufgabe') || /\bha\b/.test(lowTitle)) && (cLow.includes('hausaufgabe') || cLow.includes('übungsblatt') || cLow.includes('aufgabenblatt'))) score += 4;
+      if ((lowTitle.includes('tutorium') || lowTitle.includes('übung')) && (cLow.includes('tutorium') || cLow.includes('übung'))) score += 3;
+      if (lowTitle.includes('zeichnen') && cLow.includes('zeichnen')) score += 4;
+      if (lowTitle.includes('altklausur') && cLow.includes('altklausur')) score += 4;
+      if ((lowTitle.includes('zusammenfassung') || lowTitle.includes('formelsammlung')) && (cLow.includes('zusammenfassung') || cLow.includes('formelsammlung'))) score += 4;
+      if (lowTitle.includes('spanisch') && cLow.includes('spanisch')) score += 5;
+      if (lowTitle.includes('anki') && (lowTitle.includes('erstellen') || lowTitle.includes('nachholen')) && cLow.includes('anki')) score += 3;
+
+      if (score > bestScore) {
+        bestScore = score;
+        best = c;
+      }
+    }
+
+    return bestScore >= 5 ? best : null;
+  }
+
+  getCalibratedTaskCatalog() {
+    const catalog = this.state.taskCatalog || [];
+    const samplesById = {};
+    for (const c of catalog) samplesById[c.id] = [];
+
+    for (const x of (this.state.e || [])) {
+      if (x.k !== 'l' && x.k !== 'a') continue;
+      // Only count actual per-task durations (blockMin or sum-mode m)
+      const dur = Number(x.blockMin || (this.state.mode === 'sum' ? x.m : 0) || 0);
+      if (dur < 10 || dur > 420) continue;
+
+      let cid = x.catalogId && samplesById[x.catalogId] ? x.catalogId : '';
+      if (!cid && (x.note || x.mod || x.act)) {
+        const hit = this.matchCatalogItemForText(x.note || '', x.act || '', x.mod || '');
+        if (hit && samplesById[hit.id]) cid = hit.id;
+      }
+      if (cid) samplesById[cid].push(dur);
+    }
+
+    return catalog.map((c) => {
+      const samples = samplesById[c.id] || [];
+      const sampleCount = samples.length;
+      const avgRealMin = sampleCount > 0
+        ? Math.round(samples.reduce((s, v) => s + v, 0) / sampleCount)
+        : 0;
+      const calibrated = sampleCount >= 2;
+      const effectiveMin = calibrated ? avgRealMin : Math.max(5, Number(c.defaultMin) || 45);
+      return {
+        ...c,
+        sampleCount,
+        avgRealMin,
+        calibrated,
+        effectiveMin
+      };
+    });
+  }
+
+  upsertTaskCatalogItem({ id = '', subject = '', title = '', act = '', kind = 'l', defaultMin = 60, notes = '', source = 'user' }) {
+    const cleanTitle = String(title || '').trim();
+    if (!cleanTitle) return null;
+    if (!Array.isArray(this.state.taskCatalog)) this.state.taskCatalog = [];
+    const dur = Math.max(5, Math.min(480, Math.round(Number(defaultMin) || 45)));
+    const existing = id ? this.state.taskCatalog.find((c) => c.id === id) : null;
+    if (existing) {
+      existing.subject = String(subject || '').trim() || existing.subject || 'Allgemein';
+      existing.title = cleanTitle;
+      existing.act = act || '';
+      existing.kind = ['l', 'a', 'p'].includes(kind) ? kind : 'l';
+      existing.defaultMin = dur;
+      existing.notes = String(notes || '').trim();
+      existing.updatedAt = Date.now();
+      this.save();
+      return existing;
+    }
+    const item = {
+      id: `cat_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      subject: String(subject || '').trim() || 'Allgemein',
+      title: cleanTitle,
+      act: act || '',
+      kind: ['l', 'a', 'p'].includes(kind) ? kind : 'l',
+      defaultMin: dur,
+      notes: String(notes || '').trim(),
+      source,
+      updatedAt: Date.now()
+    };
+    this.state.taskCatalog.push(item);
+    this.save();
+    return item;
+  }
+
+  deleteTaskCatalogItem(id) {
+    if (!id) return;
+    this.pushUndo('Katalog-Baustein gelöscht');
+    this.markDeleted(id);
+    this.state.taskCatalog = (this.state.taskCatalog || []).filter((c) => c.id !== id);
+    this.save();
+  }
+
+  // AI-safe ADD-ONLY helper: AI can suggest/add new blueprints, NEVER delete or overwrite existing ones!
+  addCatalogItemsFromAi(rawItems = []) {
+    if (!Array.isArray(rawItems) || !rawItems.length) return 0;
+    if (!Array.isArray(this.state.taskCatalog)) this.state.taskCatalog = [];
+    const existingTitles = new Set(this.state.taskCatalog.map((c) => c.title.toLowerCase().trim()));
+    let added = 0;
+    const nowTs = Date.now();
+    for (const raw of rawItems) {
+      const title = String(raw?.title || '').trim();
+      if (!title || existingTitles.has(title.toLowerCase())) continue;
+      const dur = Math.max(10, Math.min(480, Math.round(Number(raw.defaultMin || raw.estMin) || 60)));
+      this.state.taskCatalog.push({
+        id: `cat_ai_${nowTs}_${added}_${Math.random().toString(36).slice(2, 5)}`,
+        subject: String(raw.subject || raw.fach || 'Allgemein').trim(),
+        title,
+        act: ['video', 'review', 'homework', 'exam', ''].includes(raw.act) ? raw.act : '',
+        kind: ['l', 'p'].includes(raw.kind) ? raw.kind : 'l',
+        defaultMin: dur,
+        notes: String(raw.notes || raw.notiz || 'Von KI vorgeschlagen').trim(),
+        source: 'ai',
+        updatedAt: nowTs
+      });
+      existingTitles.add(title.toLowerCase());
+      added++;
+    }
+    if (added > 0) this.save();
+    return added;
   }
 
   getLoadSummary7d(todayStr = toDateStr()) {

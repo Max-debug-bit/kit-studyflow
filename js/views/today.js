@@ -21,6 +21,8 @@ import {
   addChecklistItem,
   toggleChecklistItem,
   deleteChecklistItem,
+  moveChecklistItemToDate,
+  getWeekAheadImpact,
   getUnfinishedFromYesterday,
   rolloverYesterdayToToday,
   getDayLectures,
@@ -100,6 +102,7 @@ export function renderTodayView(root, ctx) {
   const checkPct = totalCheckCount ? Math.round((doneCount / totalCheckCount) * 100) : 0;
   const yesterdayOpen = getUnfinishedFromYesterday(today);
   const tomorrowItems = getChecklistForDay(tomorrow);
+  const weekImpact = getWeekAheadImpact(today);
 
   const todayLectures = getDayLectures(today, now);
   const attendedLectures = todayLectures.filter((l) => l.attended);
@@ -227,9 +230,11 @@ export function renderTodayView(root, ctx) {
                   ${it.timeLabel ? `<span class="check-time">${esc(it.timeLabel)}</span>` : ''}
                   <span class="check-text">${esc(it.title)}</span>
                   ${it.kind === 'a' ? '<span class="pill anki">Anki</span>' : ''}
+                  ${it.pulledFromDate && it.pulledFromDate > today ? `<span class="pill kit" title="Vorgezogen von ${fmtDateShort(it.pulledFromDate)}">Vorgezogen</span>` : ''}
                 </div>
               </div>
               <div class="check-actions">
+                ${!it.done ? `<button class="btn btn-xs btn-ghost" data-chk-tomorrow="${esc(it.id)}" title="Auf morgen verschieben">${icon('arrowRight', 12)}</button>` : ''}
                 ${!it.done ? `<button class="btn btn-xs btn-ghost" data-chk-timer="${esc(it.id)}" data-kind="${esc(it.kind)}" data-dur="${it.estMin || 45}" title="Mit Timer starten">${icon('play', 12)}</button>` : ''}
                 <button class="btn btn-xs btn-ghost" data-chk-del="${esc(it.id)}" title="Entfernen">${icon('x', 13)}</button>
               </div>
@@ -248,7 +253,39 @@ export function renderTodayView(root, ctx) {
           <button type="submit" class="btn btn-primary btn-sm">${icon('plus', 14)} Hinzufügen</button>
         </form>
 
-        ${tomorrowItems.length ? `
+        ${(weekImpact.candidates.length || weekImpact.boughtForwardMin > 0) ? `
+          <div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--border);">
+            <div class="row-between" style="margin-bottom:8px;gap:8px;">
+              <div class="row" style="gap:7px;">
+                <span class="xs mono" style="font-weight:700;letter-spacing:0.04em;color:var(--text);">VORARBEITEN-HEBEL (WOCHEN-WIRKUNG)</span>
+                ${weekImpact.boughtForwardMin > 0 ? `<span class="pill kit">Gekaufte Freizeit: +${fmtMin(weekImpact.boughtForwardMin)}</span>` : ''}
+              </div>
+              <span class="xs muted mono">
+                ${weekImpact.restWeekOpenCount > 0 ? `Restwoche offen: ~${fmtMin(weekImpact.restWeekOpenMin)} (${weekImpact.restWeekOpenCount})` : 'Restwoche komplett frei!'}
+              </span>
+            </div>
+            ${weekImpact.todayOpenMin > 0 && weekImpact.restWeekOpenMin > 0 ? `
+              <div class="xs muted" style="margin-bottom:8px;">
+                Wenn du heute alles abhakst (${fmtMin(weekImpact.todayOpenMin)}), erledigst du <strong style="color:var(--kit);">${Math.round((weekImpact.todayOpenMin / (weekImpact.todayOpenMin + weekImpact.restWeekOpenMin)) * 100)} %</strong> deines restlichen Wochenpensums.
+              </div>
+            ` : ''}
+            ${weekImpact.candidates.length ? `
+              <div class="entry-list">
+                ${weekImpact.candidates.map((c) => `
+                  <div class="entry-row" style="padding:7px 10px;">
+                    <div style="min-width:0;flex:1;">
+                      <div class="small" style="font-weight:580;">${esc(c.title)} <span class="xs soft mono">~${fmtMin(c.estMin)}</span></div>
+                      <div class="xs" style="color:${c.freesWholeDay ? 'var(--kit)' : 'var(--text-muted)'};margin-top:2px;">
+                        Wenn heute vorgezogen → <strong>${esc(c.impactText)}</strong>
+                      </div>
+                    </div>
+                    <button class="btn btn-xs" data-pull-today="${esc(c.id)}" title="Auf heute vorziehen">${icon('arrowLeft', 12)} Vorziehen</button>
+                  </div>
+                `).join('')}
+              </div>
+            ` : ''}
+          </div>
+        ` : tomorrowItems.length ? `
           <div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--border);">
             <div class="xs soft" style="margin-bottom:4px;font-family:var(--mono);">MORGEN (${fmtDateShort(tomorrow)}) · ${tomorrowItems.length} ${tomorrowItems.length === 1 ? 'PUNKT' : 'PUNKTE'}</div>
             <div class="xs muted">${tomorrowItems.slice(0, 3).map((x) => `${x.timeLabel ? `${esc(x.timeLabel)}: ` : ''}${esc(x.title)}`).join(' · ')}${tomorrowItems.length > 3 ? ` (+${tomorrowItems.length - 3})` : ''}</div>
@@ -719,6 +756,23 @@ export function renderTodayView(root, ctx) {
       const updated = toggleChecklistItem(el.getAttribute('data-chk-toggle'));
       if (updated && updated.done && promptLogFromChecklist) {
         promptLogFromChecklist(updated);
+      }
+    });
+  });
+
+  root.querySelectorAll('[data-chk-tomorrow]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const res = moveChecklistItemToDate(btn.getAttribute('data-chk-tomorrow'), tomorrow);
+      if (res.ok) toast(`Auf morgen (${fmtDateShort(tomorrow)}) verschoben.`, 'ok');
+    });
+  });
+
+  root.querySelectorAll('[data-pull-today]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const res = moveChecklistItemToDate(btn.getAttribute('data-pull-today'), today);
+      if (res.ok) {
+        const fromWd = WEEKDAYS_DE[parseDateStr(res.oldDate).getDay()];
+        toast(`Vorgezogen auf heute — ${fromWd} (${fmtDateShort(res.oldDate)}) ist jetzt ~${fmtMin(res.estMin)} leichter!`, 'ok');
       }
     });
   });

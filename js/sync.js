@@ -325,6 +325,8 @@ export function mergeStates(localRaw, remoteRaw) {
     customEvents: mergeMutableById(local.customEvents, remote.customEvents),
     tasks: mergeMutableById(local.tasks, remote.tasks),
     planBlocks: mergeMutableById(local.planBlocks, remote.planBlocks),
+    taskCatalog: mergeMutableById(local.taskCatalog, remote.taskCatalog),
+    taskCatalogSeeded: Boolean(local.taskCatalogSeeded || remote.taskCatalogSeeded),
     deletedIds,
     ai: mergedAi,
     icsRaw: useRemoteIcs ? (remote.icsRaw || local.icsRaw) : (local.icsRaw || remote.icsRaw),

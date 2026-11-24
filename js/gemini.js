@@ -201,6 +201,17 @@ export function buildPlanningContext(weekOffset = 0) {
       planungsRegel: 'Tägliche Anki-Reviews werden NICHT als normale Todo-Punkte in items geplant. Wichtig: Der Student macht NICHT zwingend jeden Tag ALLE fälligen Karten! Wenn ankiFuerHeuteAbgehakt === true, sind heute 0 Min. Anki mehr offen (egal wie viele Karten noch in Anki liegen). Sonst ein realistisches Tagespensum im Budget reservieren (orientiert an taeglicherZeitpufferFolgetageMin bzw. alleFaelligenKartenMin wenn kleiner).'
     },
     modulRegeln: moduleRules,
+    aufgabenKatalog: store.getCalibratedTaskCatalog().map((c) => ({
+      catalogId: c.id,
+      fach: c.subject,
+      titel: c.title,
+      taetigkeit: c.act,
+      aktiveDauerMin: c.effectiveMin,
+      startWertMin: c.defaultMin,
+      echteSessions: c.sampleCount,
+      automatischKalibriert: c.calibrated,
+      notiz: c.notes
+    })),
     uniTermineDieseWoche: weekUni,
     offenerRueckstand,
     eingeplanterRueckstand,
@@ -214,7 +225,7 @@ export function buildSystemInstruction() {
   return `Du bist ein präziser, ruhiger Studien-Planer für einen Maschinenbau-Studenten am KIT.
 Antworte auf Deutsch, klar, ohne Emojis und ohne unnötige Floskeln.
 
-Halte dich strikt an diese 6 Regeln und nutze jedes Feld aus dem JSON-Kontext gezielt:
+Halte dich strikt an diese 7 Regeln und nutze jedes Feld aus dem JSON-Kontext gezielt:
 
 1. ZEIT & REALITÄT (aktuelleUhrzeit & tagesRhythmus):
    - Plane für "heute" KEINE Zeitfenster, die vor "aktuelleUhrzeit" liegen.
@@ -245,13 +256,18 @@ Halte dich strikt an diese 6 Regeln und nutze jedes Feld aus dem JSON-Kontext ge
    - "attendance: video": Student geht NICHT hin -> Terminzeit ist frei! Plane stattdessen das Nachschauen & Durcharbeiten (~videoStudyMinutes, z. B. 150–180 Min.) in ein passendes Zeitfenster.
    - Wenn "triggersHomework: true": Nach dieser Übung fällt eine neue Hausaufgabe an. Bei "homeworkMode: understanding" gilt: reine Verständnis-Bearbeitung OHNE harte Abgabe-Panik (andere geben ab) – entspannt in den nächsten Tagen als eigenen Checklisten-Punkt einplanen.
 
-5. OFFENER RÜCKSTAND & LERNHISTORIE (offenerRueckstand, eingeplanterRueckstand, lernHistorieFuerKI):
+5. AUFGABEN-KATALOG & SELBST-KALIBRIERUNG (aufgabenKatalog):
+   - Wähle nach Möglichkeit direkt passende Bausteine aus "aufgabenKatalog" aus! Nutze deren "aktiveDauerMin" als realistische "estMin" (ab 2 echten Sessions bereits automatisch an die echten Zeiten des Studenten kalibriert!) und gib die exakte "catalogId" im Item zurück.
+   - Du darfst bestehende Katalog-Bausteine NIEMALS löschen oder umbenennen.
+   - Falls dir für eine wiederkehrende Aufgabenart ein passender Baustein im Katalog fehlt (z. B. Labor-Vorbereitung oder CAD-Aufgabe), kannst du ihn optional in "newCatalogItems" vorschlagen (die App fügt nur neue Einträge hinzu).
+
+6. OFFENER RÜCKSTAND & LERNHISTORIE (offenerRueckstand, eingeplanterRueckstand, lernHistorieFuerKI):
    - Plane Punkte aus "offenerRueckstand" (Status "open" oder "overdue") sinnvoll mit ein und gib bei diesen Punkten EXAKT deren "backlogId" aus dem JSON zurück!
    - Erfinde NIEMALS eine "backlogId", die nicht in "offenerRueckstand" oder "eingeplanterRueckstand" steht (sonst "backlogId": "").
    - Punkte in "eingeplanterRueckstand" NICHT doppelt einplanen, außer du ersetzt ihren bisherigen Tag über "replaceDates".
    - Nutze "lernHistorieFuerKI.letzteLernSessions" (was konkret zuletzt gelernt wurde), "echteDurchschnittszeitenProFach", "fokusStatistik.kapazitaetNachUniLast" (echte Kapazität an freien vs. vollen Uni-Tagen) und "fachBalance" (vernachlässigte Fächer gezielt ausgleichen), um Blocklängen und Fach-Prioritäten realistisch anzusetzen.
 
-6. FORMAT & ZEIT-HINWEISE:
+7. FORMAT & ZEIT-HINWEISE:
    - Nutze "timeLabel" nur dort, wo Lücken zwischen Uni-Terminen oder Startzeiten sinnvoll sind (z. B. "10:45", "Ab 15:30", "11:15–14:00"), sonst "" lassen.
    - Halte "dayNotes" knapp anhand der echten Zeiten aus "uniTermineDieseWoche" (z. B. "Uni 09:45–15:30" oder "Start ~10:45 · MKL 14:00").
    - Wenn du einen Plan vorschlägst, gib nach einer kurzen Erklärung exakt diesen JSON-Block aus:
@@ -266,21 +282,23 @@ Halte dich strikt an diese 6 Regeln und nutze jedes Feld aus dem JSON-Kontext ge
     {
       "d": "YYYY-MM-DD",
       "timeLabel": "",
-      "title": "WK: VL nacharbeiten & Ankis erstellen",
+      "title": "WK: VL nacharbeiten + Ankis erstellen",
       "kind": "l",
       "estMin": 75,
+      "catalogId": "cat_wk_vl",
       "backlogId": ""
     }
   ],
-  "reminders": []
+  "reminders": [],
+  "newCatalogItems": []
 }
 \`\`\`
-Wichtig: Übernimm existierende "vorgemerkteTermine" nicht doppelt in "reminders" – trag in "reminders" nur NEUE Sondertermine ein.`;
+Wichtig: Übernimm existierende "vorgemerkteTermine" nicht doppelt in "reminders" – trag in "reminders" nur NEUE Sondertermine ein. In "newCatalogItems" nur echte NEUE Baustein-Typen (Format: {"subject":"Fach","title":"Name","act":"review|video|homework|exam|","defaultMin":60,"notes":"..."}), sonst [] lassen.`;
 }
 
 export function extractProposalFromReply(text) {
   if (!text) return null;
-  const match = /```json\s*([\s\S]*?)```/i.exec(text) || /```\s*(\{[\s\S]*?"items"[\s\S]*?\})\s*```/i.exec(text);
+  const match = /```json\s*([\s\S]*?)```/i.exec(text) || /```\s*(\{[\s\S]*?\})\s*```/i.exec(text);
   let jsonStr = match ? match[1] : null;
   if (!jsonStr) {
     const trimmed = text.trim();
@@ -299,6 +317,7 @@ export function extractProposalFromReply(text) {
               title: b.title,
               kind: b.kind === 'a' ? 'a' : b.kind === 'p' ? 'p' : 'l',
               estMin: 45,
+              catalogId: b.catalogId || '',
               backlogId: b.backlogId || ''
             }))
           : [];
@@ -311,6 +330,7 @@ export function extractProposalFromReply(text) {
           title: String(it.title).trim(),
           kind: ['l', 'a', 'p'].includes(it.kind) ? it.kind : (/\banki/i.test(it.title) ? 'a' : 'l'),
           estMin: Math.max(0, Number(it.estMin) || 0),
+          catalogId: String(it.catalogId || '').trim(),
           backlogId: String(it.backlogId || '').trim()
         }));
 
@@ -318,13 +338,30 @@ export function extractProposalFromReply(text) {
         ? parsed.reminders.map((r) => (typeof r === 'string' ? r.trim() : String(r?.text || '').trim())).filter(Boolean)
         : [];
 
-      if (!items.length && !reminders.length) return null;
+      const newCatalogItems = Array.isArray(parsed.newCatalogItems)
+        ? parsed.newCatalogItems
+            .filter((c) => c && c.title)
+            .map((c) => ({
+              subject: String(c.subject || c.fach || 'Allgemein').trim(),
+              title: String(c.title).trim(),
+              act: ['video', 'review', 'homework', 'exam', ''].includes(c.act) ? c.act : '',
+              kind: ['l', 'p'].includes(c.kind) ? c.kind : 'l',
+              defaultMin: Math.max(10, Math.min(480, Math.round(Number(c.defaultMin || c.estMin) || 60))),
+              notes: String(c.notes || c.notiz || '').trim()
+            }))
+        : [];
+
+      const suggestedRhythm = String(parsed.suggestedRhythmNote || '').trim();
+
+      if (!items.length && !reminders.length && !newCatalogItems.length && !suggestedRhythm) return null;
       return {
-        summary: parsed.summary || 'Uni-Plan Checkliste',
+        summary: parsed.summary || (suggestedRhythm && !items.length ? 'Wochenrückblick & Rhythmus' : 'Uni-Plan Checkliste'),
         replaceDates: Array.isArray(parsed.replaceDates) ? parsed.replaceDates : [],
         dayNotes: parsed.dayNotes && typeof parsed.dayNotes === 'object' ? parsed.dayNotes : {},
         items,
-        reminders
+        reminders,
+        newCatalogItems,
+        suggestedRhythm
       };
     } catch {
       // Fall through to plain-text parser
@@ -338,7 +375,9 @@ export function extractProposalFromReply(text) {
       replaceDates: [],
       dayNotes: textParsed.dayNotes,
       items: textParsed.items,
-      reminders: textParsed.reminders.map((r) => r.text)
+      reminders: textParsed.reminders.map((r) => r.text),
+      newCatalogItems: [],
+      suggestedRhythm: ''
     };
   }
   return null;
@@ -490,16 +529,10 @@ export async function runWeeklyReview(weekOffset = 0) {
   };
 }
 
-// ---------- Multimodal Semesterplan Image Scanner (#2) ----------
+// ---------- Multimodal Semesterplan Image Scanner (API + Gemini-Pro-Bridge!) ----------
 
-export async function scanSemesterPlanImage({ base64Data, mimeType, userHint = '' }) {
-  const apiKey = (store.state.ai.apiKey || '').trim();
-  if (!apiKey) {
-    throw new Error('Für den automatischen Bild-Scanner wird dein kostenloser Gemini API-Key in den Einstellungen benötigt.');
-  }
-
-  const modulesList = Object.values(store.state.modules).map((m) => m.shortName).join(', ');
-  const sys = `Du liest Universitäts-Semesterpläne (z. B. KIT MKL-Semesterplan mit Vorlesungen, Übungen, Workshops) aus Bildern sehr präzise aus.
+export function buildSemesterScanSystemInstruction() {
+  return `Du liest Universitäts-Semesterpläne (z. B. KIT MKL-Semesterplan mit Vorlesungen, Übungen, Workshops) aus Bildern sehr präzise aus.
 Antworte AUSSCHLIESSLICH mit einem validen JSON-Codeblock in exakt diesem Format:
 \`\`\`json
 {
@@ -529,9 +562,53 @@ Antworte AUSSCHLIESSLICH mit einem validen JSON-Codeblock in exakt diesem Format
 Regeln:
 - "overrideType" darf nur "exercise" (Übung, keine Nacharbeit), "lecture" (Vorlesung, mit Nacharbeit) oder "cancelled" (fällt aus/Feiertag) sein.
 - "matchModule" ist das kurze Fach-Stichwort zum Zuordnen im WebCal (z. B. "MKL", "HM", "WK", "TM", "FT").
-- Achte genau auf Jahreswechsel (Wintersemester 2026/2027: Okt-Dez = 2026, Jan-März = 2027, passend zum aktuellen Datum ${toDateStr()}).
+- Achte genau auf Jahreswechsel (passend zum aktuellen Datum ${toDateStr()}).
 - "customEvents": einmalige Zusatztermine wie Workshops mit konkretem Datum, Start- und Endzeit.`;
+}
 
+export function buildSemesterScanBridgePrompt(userHint = '') {
+  const modulesList = Object.values(store.state.modules).map((m) => m.shortName).join(', ');
+  return `${buildSemesterScanSystemInstruction()}
+
+---
+KONTEXT:
+Bekannte Module im Kalender: ${modulesList || 'MKL, HM, TM, WK, FT'}.
+Aktuelles Datum: ${toDateStr()}.
+Zusatzhinweis des Studenten: ${userHint || 'Keine besonderen Hinweise.'}
+
+AUFTRAG:
+Ich hänge dir jetzt das Bild / den Screenshot meines Semesterplans an. Lies bitte alle erkennbaren Termine (Vorlesung vs. Übung vs. Ausfall sowie Workshops/Sondertermine) präzise in das JSON-Schema oben aus.`;
+}
+
+export function parseSemesterScanReply(rawText, modelUsed = 'Gemini Pro (Bridge)') {
+  const txt = String(rawText || '').trim();
+  if (!txt) throw new Error('Bitte zuerst die JSON-Antwort von Gemini einfügen.');
+  const match = /```json\s*([\s\S]*?)```/i.exec(txt) || /```\s*(\{[\s\S]*?\})\s*```/i.exec(txt);
+  let jsonStr = match ? match[1] : txt;
+  if (!jsonStr.trim().startsWith('{')) {
+    const first = jsonStr.indexOf('{');
+    const last = jsonStr.lastIndexOf('}');
+    if (first >= 0 && last > first) jsonStr = jsonStr.slice(first, last + 1);
+  }
+  const parsed = JSON.parse(jsonStr);
+  if (!parsed || typeof parsed !== 'object') throw new Error('Kein gültiges JSON erkannt.');
+  return {
+    summary: parsed.summary || 'Semesterplan erkannt',
+    overrides: Array.isArray(parsed.overrides) ? parsed.overrides : [],
+    customEvents: Array.isArray(parsed.customEvents) ? parsed.customEvents : [],
+    reminders: Array.isArray(parsed.reminders) ? parsed.reminders : [],
+    modelUsed
+  };
+}
+
+export async function scanSemesterPlanImage({ base64Data, mimeType, userHint = '' }) {
+  const apiKey = (store.state.ai.apiKey || '').replace(/\s+/g, '');
+  if (!apiKey) {
+    throw new Error('Kein Gemini API-Key hinterlegt — nutze im selben Fenster den Tab „Gemini-Pro-Bridge“.');
+  }
+
+  const modulesList = Object.values(store.state.modules).map((m) => m.shortName).join(', ');
+  const sys = buildSemesterScanSystemInstruction();
   const promptText = `Bekannte Module im Kalender: ${modulesList || 'MKL, HM, TM, WK, FT'}.
 Aktuelles Datum: ${toDateStr()}.
 Zusatzhinweis des Studenten: ${userHint || 'Keine besonderen Hinweise.'}
@@ -546,17 +623,8 @@ Bitte lies alle erkennbaren Termine (Vorlesung vs. Übung vs. Ausfall sowie Work
   }];
 
   const preferred = store.state.ai.model || 'gemini-3.8-flash';
-  const result = await callGeminiWithFallback({ apiKey: apiKey.replace(/\s+/g, ''), preferred, contents, systemInstruction: sys });
-  const match = /```json\s*([\s\S]*?)```/i.exec(result.text);
-  const jsonStr = match ? match[1] : result.text.trim();
-  const parsed = JSON.parse(jsonStr);
-  return {
-    summary: parsed.summary || 'Semesterplan erkannt',
-    overrides: Array.isArray(parsed.overrides) ? parsed.overrides : [],
-    customEvents: Array.isArray(parsed.customEvents) ? parsed.customEvents : [],
-    reminders: Array.isArray(parsed.reminders) ? parsed.reminders : [],
-    modelUsed: result.modelUsed
-  };
+  const result = await callGeminiWithFallback({ apiKey, preferred, contents, systemInstruction: sys });
+  return parseSemesterScanReply(result.text, result.modelUsed);
 }
 
 export function buildGeminiProBridgePrompt(userRequest, weekOffset = 0) {
@@ -687,11 +755,28 @@ export async function testGeminiConnection(apiKey, model = 'gemini-3.8-flash') {
 }
 
 export function applyProposalToWeek(proposal) {
-  if (!proposal) return { addedItems: 0, addedReminders: 0 };
-  return applyParsedChecklist({
-    items: proposal.items || [],
-    dayNotes: proposal.dayNotes || {},
-    reminders: proposal.reminders || [],
-    replaceDates: proposal.replaceDates || []
-  });
+  if (!proposal) return { addedItems: 0, addedReminders: 0, addedCatalog: 0, appliedRhythm: false };
+  let addedItems = 0;
+  let addedReminders = 0;
+  if ((proposal.items && proposal.items.length) || (proposal.reminders && proposal.reminders.length) || (proposal.replaceDates && proposal.replaceDates.length)) {
+    const r = applyParsedChecklist({
+      items: proposal.items || [],
+      dayNotes: proposal.dayNotes || {},
+      reminders: proposal.reminders || [],
+      replaceDates: proposal.replaceDates || []
+    });
+    addedItems = r.addedItems;
+    addedReminders = r.addedReminders;
+  }
+  const addedCatalog = Array.isArray(proposal.newCatalogItems) && proposal.newCatalogItems.length
+    ? store.addCatalogItemsFromAi(proposal.newCatalogItems)
+    : 0;
+  let appliedRhythm = false;
+  if (proposal.suggestedRhythm) {
+    store.pushUndo('Rhythmus-Orientierung aktualisiert');
+    store.state.ai.rhythmNotes = proposal.suggestedRhythm;
+    store.save();
+    appliedRhythm = true;
+  }
+  return { addedItems, addedReminders, addedCatalog, appliedRhythm };
 }

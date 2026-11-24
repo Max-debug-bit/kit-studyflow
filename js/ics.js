@@ -108,14 +108,14 @@ export function classifyKitSummary(rawSummary) {
     defaultAttendance = isExercise ? 'live' : 'video';
     defaultCreatesAnki = false;
     defaultLiveReviewMin = 0;
-    defaultVideoStudyMin = isExercise ? 0 : 165;
+    defaultVideoStudyMin = isExercise ? 0 : 110;
     defaultTriggersHomework = isExercise && type === 'Ü';
   } else if (lower.includes('technische mechanik')) {
     const roman = /\b(i{1,3}|iv)\b/i.exec(cleanTitle)?.[1]?.toUpperCase() || '';
     subjectGroup = `TM ${roman}`.trim();
     shortName = `${subjectGroup} (${type})`;
     defaultCreatesAnki = !isExercise;
-    defaultLiveReviewMin = isExercise ? 0 : 75;
+    defaultLiveReviewMin = isExercise ? 0 : 45;
     defaultVideoStudyMin = isExercise ? 0 : 165;
     defaultTriggersHomework = isExercise && type === 'Ü';
   } else if (lower.includes('maschinenkonstruktionslehre')) {

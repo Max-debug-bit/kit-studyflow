@@ -1,7 +1,7 @@
 // Main bootstrap: monochrome icons, keyboard shortcuts (1-5, N, Strg+Z), Undo Toast,
 // Checklist->Log floating bar (#1), Pixel 9a #pair= QR onboarding (#8), auto-lecture sync & PWA SW
 
-import { store, toDateStr, toTimeStr } from './store.js';
+import { store, toDateStr, toTimeStr, fmtDateShort, parseDateStr, WEEKDAYS_DE } from './store.js';
 import { scheduleAutoSync, flushPendingSync, syncNow, pullFromGist, isGistConfigured, onSyncStatusChange } from './sync.js';
 import { syncDayLecturesToProductive } from './checklist.js';
 import { decodePairingCode, isPinProtectedPairingCode } from './qr.js';
@@ -135,6 +135,11 @@ function promptLogFromChecklist(item) {
   const moduleOpts = Object.values(store.state.modules || {})
     .map((m) => `<option value="${escHtml(m.id)}" ${m.id === meta.mod ? 'selected' : ''}>${escHtml(m.shortName)}</option>`)
     .join('');
+  const calibratedCatalog = store.getCalibratedTaskCatalog();
+  const autoCatId = item.catalogId || (activeKind !== 'a' ? (store.matchCatalogItemForText(item.title, meta.act, meta.mod)?.id || '') : '');
+  const catalogOpts = calibratedCatalog
+    .map((c) => `<option value="${escHtml(c.id)}" ${c.id === autoCatId ? 'selected' : ''}>${escHtml(c.subject)} · ${escHtml(c.title)} (${c.effectiveMin}m)</option>`)
+    .join('');
 
   openModal(`
     <div class="card-header">
@@ -189,6 +194,16 @@ function promptLogFromChecklist(item) {
           </select>
         </div>
       </div>
+
+      ${!item.isAnkiDaily ? `
+        <div class="field">
+          <label>Katalog-Baustein (kalibriert ab 2x automatisch)</label>
+          <select id="qlm-cat" class="input">
+            <option value="">Automatisch / keiner</option>
+            ${catalogOpts}
+          </select>
+        </div>
+      ` : ''}
 
       <div class="row-between" style="margin-top:4px;">
         <button type="button" class="btn btn-sm" id="qlm-skip">${item.isAnkiDaily && item.alreadyLoggedMin > 0 ? `Ohne neue Zeit (${item.alreadyLoggedMin} min behalten)` : 'Ohne Zeit abhaken'}</button>
@@ -295,6 +310,7 @@ function promptLogFromChecklist(item) {
         totalToRecord = store.state.mode === 'sum' ? val : curMin + val;
       }
       const finalAct = activeKind === 'a' ? 'anki' : activeKind === 'p' ? '' : actSel.value;
+      const chosenCat = modalEl.querySelector('#qlm-cat')?.value || autoCatId || '';
       const res = store.addEntry({
         d: today,
         t: toTimeStr(),
@@ -302,15 +318,21 @@ function promptLogFromChecklist(item) {
         m: totalToRecord,
         mod: modalEl.querySelector('#qlm-mod').value,
         act: finalAct,
+        catalogId: activeKind === 'a' ? '' : chosenCat,
         note: item.title,
         sessionMin
       });
       closeModal();
+      const wasPulled = (item.pulledFromDate && item.pulledFromDate > (item.d || today)) || (item.d && item.d > today);
+      const relievedDate = item.pulledFromDate || (item.d && item.d > today ? item.d : '');
+      const relievedLabel = relievedDate ? `${WEEKDAYS_DE[parseDateStr(relievedDate).getDay()]} (${fmtDateShort(relievedDate)})` : 'deine Restwoche';
       toast(
         res.ok
-          ? (logMode === 'total'
-              ? `Stand ${totalToRecord} min (+${sessionMin} min) für „${item.title}“ gespeichert.`
-              : `+${sessionMin} min für „${item.title}“ gespeichert (Stand: ${totalToRecord} min).`)
+          ? (wasPulled
+              ? `Stark vorgearbeitet! +${sessionMin} min gespeichert — ${relievedLabel} ist jetzt spürbar leichter.`
+              : logMode === 'total'
+                ? `Stand ${totalToRecord} min (+${sessionMin} min) für „${item.title}“ gespeichert.`
+                : `+${sessionMin} min für „${item.title}“ gespeichert (Stand: ${totalToRecord} min).`)
           : res.message,
         res.ok ? 'ok' : 'err'
       );

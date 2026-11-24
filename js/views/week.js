@@ -24,6 +24,10 @@ import {
   toggleChecklistItem,
   updateChecklistItem,
   deleteChecklistItem,
+  estimateChecklistItemMinutes,
+  moveChecklistItemToDate,
+  shiftChecklistItemByDays,
+  moveChecklistItemToBacklog,
   addReminder,
   toggleReminder,
   deleteReminder,
@@ -38,7 +42,11 @@ import {
   applySemesterScanResult,
   exportWeekChecklistAsText
 } from '../checklist.js';
-import { scanSemesterPlanImage } from '../gemini.js';
+import {
+  scanSemesterPlanImage,
+  buildSemesterScanBridgePrompt,
+  parseSemesterScanReply
+} from '../gemini.js';
 import { syncModulesFromIcs } from '../ics.js';
 import { icon } from '../icons.js';
 
@@ -66,6 +74,7 @@ export function renderWeekView(root, { toast, navigate, openModal, closeModal, p
   const reminders = store.state.reminders || [];
   const backlog = store.state.backlog || [];
   const customEvents = store.state.customEvents || [];
+  const calibratedCatalog = store.getCalibratedTaskCatalog();
 
   const days = [];
   for (let i = 0; i < 7; i++) {
@@ -75,7 +84,8 @@ export function renderWeekView(root, { toast, navigate, openModal, closeModal, p
     const autoUni = getDayUniSummaryLabel(d, lectures);
     const note = store.state.dayNotes?.[d] || autoUni || (lectures.filter((l) => !l.cancelled).length === 0 ? 'Frei' : '');
     const items = getChecklistForDay(d);
-    days.push({ d, wd, note, lectures, items });
+    const openMin = items.filter((x) => !x.done).reduce((s, x) => s + estimateChecklistItemMinutes(x, calibratedCatalog), 0);
+    days.push({ d, wd, note, lectures, items, openMin });
   }
 
   const openBacklogCount = backlog.filter((b) => b.status === 'open' || b.status === 'overdue').length;
@@ -116,18 +126,19 @@ export function renderWeekView(root, { toast, navigate, openModal, closeModal, p
         </div>
       ` : ''}
 
-      <!-- 1. 7-Day Uni-Plan Checkliste -->
+      <!-- 1. 7-Day Uni-Plan Checkliste (Drag & Drop + 1-Klick Verschieben) -->
       <section class="checklist-section">
         ${days.map((day) => {
           const isToday = day.d === today;
           return `
-            <div style="margin-bottom:18px;">
+            <div class="day-drop-zone" data-drop-day="${day.d}" style="margin-bottom:18px;">
               <div class="day-divider ${isToday ? 'is-today' : ''}">
                 <div class="day-divider-left">
                   <span class="day-divider-title">${day.wd}, ${fmtDateShort(day.d)}${isToday ? ' (HEUTE)' : ''}</span>
                   <span class="day-divider-meta" data-edit-note="${day.d}" style="cursor:pointer;" title="Tages-Hinweis bearbeiten">
                     ${day.note ? `| ${esc(day.note)}` : '| + Hinweis'}
                   </span>
+                  ${day.openMin > 0 ? `<span class="xs soft mono">· ~${fmtMin(day.openMin)} offen</span>` : ''}
                 </div>
                 <button class="btn btn-xs btn-ghost" data-add-day="${day.d}">${icon('plus', 12)} Punkt</button>
               </div>
@@ -160,24 +171,31 @@ export function renderWeekView(root, { toast, navigate, openModal, closeModal, p
               ` : ''}
 
               <div class="check-list">
-                ${day.items.map((it) => `
-                  <div class="check-item ${it.done ? 'done' : ''}">
+                ${day.items.map((it) => {
+                  const est = estimateChecklistItemMinutes(it, calibratedCatalog);
+                  return `
+                  <div class="check-item ${it.done ? 'done' : ''}" draggable="true" data-drag-chk="${esc(it.id)}">
                     <div class="check-item-main" data-chk-toggle="${esc(it.id)}">
                       <span class="check-box">${it.done ? icon('check', 12) : ''}</span>
                       <div class="row" style="gap:8px;flex:1;">
                         ${it.timeLabel ? `<span class="check-time">${esc(it.timeLabel)}</span>` : ''}
                         <span class="check-text">${esc(it.title)}</span>
+                        ${!it.done && est > 0 ? `<span class="xs soft mono">~${fmtMin(est)}</span>` : ''}
                         ${it.kind === 'a' ? '<span class="pill anki">Anki</span>' : ''}
                         ${it.backlogId ? '<span class="pill">Rückstand</span>' : ''}
+                        ${it.pulledFromDate && it.pulledFromDate > it.d ? '<span class="pill kit">Vorgezogen</span>' : ''}
                       </div>
                     </div>
                     <div class="check-actions">
-                      ${!it.done ? `<button class="btn btn-xs btn-ghost" data-chk-timer="${esc(it.id)}" data-kind="${esc(it.kind)}" data-dur="${it.estMin || 45}" title="Timer starten">${icon('play', 12)}</button>` : ''}
-                      <button class="btn btn-xs btn-ghost" data-chk-edit="${esc(it.id)}" title="Bearbeiten / Verschieben">${icon('edit', 12)}</button>
+                      ${!it.done ? `<button class="btn btn-xs btn-ghost" data-chk-shift="${esc(it.id)}" data-delta="-1" title="1 Tag vorziehen">${icon('arrowLeft', 12)}</button>` : ''}
+                      ${!it.done ? `<button class="btn btn-xs btn-ghost" data-chk-shift="${esc(it.id)}" data-delta="1" title="1 Tag nach hinten">${icon('arrowRight', 12)}</button>` : ''}
+                      ${!it.done ? `<button class="btn btn-xs btn-ghost" data-chk-timer="${esc(it.id)}" data-kind="${esc(it.kind)}" data-dur="${est || 45}" title="Timer starten">${icon('play', 12)}</button>` : ''}
+                      <button class="btn btn-xs btn-ghost" data-chk-edit="${esc(it.id)}" title="Bearbeiten / Auf anderen Tag legen">${icon('edit', 12)}</button>
                       <button class="btn btn-xs btn-ghost" data-chk-del="${esc(it.id)}" title="Löschen">${icon('x', 13)}</button>
                     </div>
                   </div>
-                `).join('') || `<div class="xs soft" style="padding:4px 10px;">Keine Checklisten-Punkte</div>`}
+                `;
+                }).join('') || `<div class="xs soft" style="padding:4px 10px;">Keine Checklisten-Punkte (Todo hierher ziehen zum Verschieben)</div>`}
               </div>
             </div>
           `;
@@ -334,6 +352,40 @@ export function renderWeekView(root, { toast, navigate, openModal, closeModal, p
           }).join('') || '<div class="small muted">Lade eine .ics-Datei oder lege deine Fächer manuell an.</div>'}
         </div>
       </section>
+
+      <!-- 4. Aufgaben-Katalog (Bausteine für KI & Auto-Kalibrierung ab 2 Sessions) -->
+      <section class="card">
+        <div class="card-header">
+          <div>
+            <h2 class="card-title">${icon('list', 15)} Aufgaben-Katalog (${calibratedCatalog.length})</h2>
+            <div class="xs muted" style="margin-top:2px;">Wird an KI-Prompt & API geschickt · ab 2 echten Sessions automatisch kalibriert (KI darf nur hinzufügen, nie löschen)</div>
+          </div>
+          <button class="btn btn-xs btn-primary" id="btn-add-catalog">${icon('plus', 12)} Baustein</button>
+        </div>
+        <div class="grid-2">
+          ${calibratedCatalog.map((c) => `
+            <div class="entry-row">
+              <div style="min-width:0;">
+                <div class="row" style="gap:6px;">
+                  <span class="pill">${esc(c.subject || 'Allgemein')}</span>
+                  <span style="font-weight:600;font-size:0.86rem;">${esc(c.title)}</span>
+                  ${c.source === 'ai' ? '<span class="pill purple">KI</span>' : ''}
+                </div>
+                <div class="xs muted mono" style="margin-top:3px;">
+                  Start: ${c.defaultMin}m
+                  ${c.calibrated
+                    ? ` · <strong style="color:var(--kit);">Auto-Ø (${c.sampleCount}x): ${c.effectiveMin}m</strong>`
+                    : c.sampleCount === 1
+                      ? ` · 1 Session: ${c.avgRealMin}m (ab 2x auto)`
+                      : ` · Aktiv: ${c.effectiveMin}m`}
+                  ${c.notes ? ` · ${esc(c.notes)}` : ''}
+                </div>
+              </div>
+              <button class="btn btn-xs" data-edit-cat="${esc(c.id)}">Ändern</button>
+            </div>
+          `).join('') || '<div class="small muted">Noch keine Bausteine. Klicke auf „+ Baustein“.</div>'}
+        </div>
+      </section>
     </div>
   `;
 
@@ -346,39 +398,133 @@ export function renderWeekView(root, { toast, navigate, openModal, closeModal, p
   root.querySelector('#wk-audit-plan')?.addEventListener('click', () => navigate('planner', { autoAudit: true }));
   root.querySelector('#wk-review-plan')?.addEventListener('click', () => navigate('planner', { autoReview: true }));
 
-  // Semesterplan-Scanner Modal (#2)
+  // Semesterplan-Scanner Modal (BOTH Gemini-Pro-Bridge AND Direct API!)
   root.querySelector('#wk-scan-sem')?.addEventListener('click', () => {
     let lastScan = null;
+    const hasApiKey = Boolean(store.state.ai?.apiKey && store.state.ai.apiKey.trim().length > 10);
+    let scanMode = hasApiKey ? 'bridge' : 'bridge'; // Default to reliable Gemini-Pro-Bridge, 1-click toggle to API
+
+    const renderScanPreview = (modalEl, scan) => {
+      const previewEl = modalEl.querySelector('#sem-preview');
+      previewEl.classList.remove('hidden');
+      previewEl.innerHTML = `
+        <div class="proposal-card" style="margin-top:0;">
+          <div class="row-between" style="margin-bottom:8px;">
+            <strong class="small">${esc(scan.summary)}</strong>
+            <button class="btn btn-xs btn-primary" id="sem-apply">${icon('check', 12)} Alle übernehmen</button>
+          </div>
+          <div class="xs muted" style="margin-bottom:6px;">
+            ${scan.overrides.length} Tages-Overrides · ${scan.customEvents.length} Zusatztermine · ${scan.reminders.length} Vormerkungen (${esc(scan.modelUsed || '')})
+          </div>
+          <div class="entry-list" style="max-height:220px;overflow-y:auto;">
+            ${scan.overrides.map((o) => `
+              <div class="entry-row" style="padding:5px 8px;">
+                <span class="xs mono">${fmtDateShort(o.d)} · ${esc(o.matchModule)} ${o.label ? `(${esc(o.label)})` : ''}</span>
+                <span class="pill">${o.overrideType === 'exercise' ? 'Übung' : o.overrideType === 'cancelled' ? 'Fällt aus' : 'VL'}</span>
+              </div>
+            `).join('')}
+            ${scan.customEvents.map((e) => `
+              <div class="entry-row" style="padding:5px 8px;">
+                <span class="xs mono">${fmtDateShort(e.date)} ${esc(e.start)}–${esc(e.end)} · ${esc(e.title)}</span>
+                <span class="pill kit">Termin</span>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      `;
+      previewEl.querySelector('#sem-apply')?.addEventListener('click', () => {
+        const res = applySemesterScanResult(scan);
+        closeModal();
+        toast(`Übernommen: ${res.appliedOverrides} Overrides, ${res.addedEvents} Termine, ${res.addedReminders} Vormerkungen.`, 'ok', { undo: true });
+      });
+    };
+
     openModal(`
       <div class="card-header">
-        <h3 class="card-title">Semesterplan per Bild einlesen</h3>
+        <h3 class="card-title">Semesterplan einlesen (Pro-Bridge & API)</h3>
         <button class="icon-btn" id="m-close">${icon('x', 15)}</button>
       </div>
-      <p class="xs muted" style="margin-top:0;">
-        Lade z. B. einen Screenshot deines MKL-Semesterplans hoch. Gemini erkennt automatisch alle VL-/Übungs-Wechsel und Workshops fürs ganze Semester und zeigt dir vorher eine Vorschau.
-      </p>
+      <div class="row-between" style="margin-bottom:10px;">
+        <div class="segmented">
+          <button type="button" data-sem-mode="bridge" class="active">Gemini-Pro-Bridge</button>
+          <button type="button" data-sem-mode="api">Direkt per API</button>
+        </div>
+        <span class="xs soft">Empfohlen bei API-Spikes: Bridge</span>
+      </div>
       <div class="stack">
         <div class="field">
-          <label>Screenshot / Bild auswählen (PNG, JPG, WebP)</label>
-          <input type="file" id="sem-file" accept="image/*" class="input" />
-        </div>
-        <div class="field">
-          <label>Hinweis für Gemini (optional)</label>
+          <label>Hinweis für Gemini (optional — gilt für Bridge & API)</label>
           <input type="text" id="sem-hint" class="input" placeholder="z. B. MKL-Plan · Ich bin in Block 4 (Mi 14:00–15:30)" />
         </div>
-        <div class="row">
-          <button class="btn btn-primary btn-sm" id="sem-analyze">${icon('spark', 14)} Mit Gemini analysieren</button>
-          <span class="xs muted" id="sem-status"></span>
+
+        <!-- Panel A: Gemini-Pro-Bridge (Zero API needed!) -->
+        <div id="sem-panel-bridge" class="stack">
+          <p class="xs muted" style="margin:0;">
+            1. Prompt kopieren → 2. Zusammen mit deinem Semesterplan-Screenshot in <strong>Gemini Pro</strong> schicken → 3. JSON-Antwort hier einfügen.
+          </p>
+          <div class="row">
+            <button type="button" class="btn btn-primary btn-sm" id="sem-copy-prompt">${icon('copy', 13)} Scan-Prompt kopieren</button>
+          </div>
+          <textarea id="sem-bridge-paste" class="input mono" style="min-height:110px;" placeholder="JSON-Antwort aus Gemini Pro hier einfügen..."></textarea>
+          <div class="row">
+            <button type="button" class="btn btn-primary btn-sm" id="sem-bridge-parse">${icon('check', 13)} Vorschau erzeugen</button>
+            <span class="xs muted" id="sem-bridge-status"></span>
+          </div>
         </div>
+
+        <!-- Panel B: Direct API -->
+        <div id="sem-panel-api" class="stack hidden">
+          <div class="field">
+            <label>Screenshot / Bild auswählen (PNG, JPG, WebP)</label>
+            <input type="file" id="sem-file" accept="image/*" class="input" />
+          </div>
+          <div class="row">
+            <button type="button" class="btn btn-primary btn-sm" id="sem-analyze">${icon('spark', 14)} Mit Gemini-API analysieren</button>
+            <span class="xs muted" id="sem-status"></span>
+          </div>
+        </div>
+
         <div id="sem-preview" class="hidden stack"></div>
       </div>
     `, (modalEl) => {
       modalEl.querySelector('#m-close')?.addEventListener('click', closeModal);
+
+      modalEl.querySelectorAll('[data-sem-mode]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          scanMode = btn.getAttribute('data-sem-mode');
+          modalEl.querySelectorAll('[data-sem-mode]').forEach((b) => b.classList.toggle('active', b === btn));
+          modalEl.querySelector('#sem-panel-bridge').classList.toggle('hidden', scanMode !== 'bridge');
+          modalEl.querySelector('#sem-panel-api').classList.toggle('hidden', scanMode !== 'api');
+        });
+      });
+
+      modalEl.querySelector('#sem-copy-prompt')?.addEventListener('click', async () => {
+        const hint = modalEl.querySelector('#sem-hint').value.trim();
+        try {
+          await navigator.clipboard.writeText(buildSemesterScanBridgePrompt(hint));
+          toast('Semesterplan-Prompt kopiert! Jetzt mit Screenshot in Gemini Pro einfügen.', 'ok');
+        } catch {
+          toast('Kopieren fehlgeschlagen.', 'err');
+        }
+      });
+
+      modalEl.querySelector('#sem-bridge-parse')?.addEventListener('click', () => {
+        const raw = modalEl.querySelector('#sem-bridge-paste').value;
+        const st = modalEl.querySelector('#sem-bridge-status');
+        try {
+          lastScan = parseSemesterScanReply(raw, 'Gemini Pro (Bridge)');
+          st.textContent = 'Antwort erkannt!';
+          renderScanPreview(modalEl, lastScan);
+        } catch (err) {
+          st.textContent = '';
+          toast(`JSON-Fehler: ${err.message}`, 'err');
+        }
+      });
+
       modalEl.querySelector('#sem-analyze')?.addEventListener('click', async () => {
         const file = modalEl.querySelector('#sem-file')?.files?.[0];
         if (!file) { toast('Bitte zuerst ein Bild auswählen.', 'err'); return; }
         const statusEl = modalEl.querySelector('#sem-status');
-        const previewEl = modalEl.querySelector('#sem-preview');
         const btn = modalEl.querySelector('#sem-analyze');
         btn.disabled = true;
         statusEl.textContent = 'Analysiere Bild mit Gemini...';
@@ -395,37 +541,7 @@ export function renderWeekView(root, { toast, navigate, openModal, closeModal, p
             userHint: modalEl.querySelector('#sem-hint').value.trim()
           });
           statusEl.textContent = `Fertig (${lastScan.modelUsed})`;
-          previewEl.classList.remove('hidden');
-          previewEl.innerHTML = `
-            <div class="proposal-card" style="margin-top:0;">
-              <div class="row-between" style="margin-bottom:8px;">
-                <strong class="small">${esc(lastScan.summary)}</strong>
-                <button class="btn btn-xs btn-primary" id="sem-apply">${icon('check', 12)} Alle übernehmen</button>
-              </div>
-              <div class="xs muted" style="margin-bottom:6px;">
-                ${lastScan.overrides.length} Tages-Overrides · ${lastScan.customEvents.length} Zusatztermine · ${lastScan.reminders.length} Vormerkungen
-              </div>
-              <div class="entry-list" style="max-height:220px;overflow-y:auto;">
-                ${lastScan.overrides.map((o) => `
-                  <div class="entry-row" style="padding:5px 8px;">
-                    <span class="xs mono">${fmtDateShort(o.d)} · ${esc(o.matchModule)} ${o.label ? `(${esc(o.label)})` : ''}</span>
-                    <span class="pill">${o.overrideType === 'exercise' ? 'Übung' : o.overrideType === 'cancelled' ? 'Fällt aus' : 'VL'}</span>
-                  </div>
-                `).join('')}
-                ${lastScan.customEvents.map((e) => `
-                  <div class="entry-row" style="padding:5px 8px;">
-                    <span class="xs mono">${fmtDateShort(e.date)} ${esc(e.start)}–${esc(e.end)} · ${esc(e.title)}</span>
-                    <span class="pill kit">Termin</span>
-                  </div>
-                `).join('')}
-              </div>
-            </div>
-          `;
-          previewEl.querySelector('#sem-apply')?.addEventListener('click', () => {
-            const res = applySemesterScanResult(lastScan);
-            closeModal();
-            toast(`Übernommen: ${res.appliedOverrides} Overrides, ${res.addedEvents} Termine, ${res.addedReminders} Vormerkungen.`, 'ok', { undo: true });
-          });
+          renderScanPreview(modalEl, lastScan);
         } catch (err) {
           statusEl.textContent = '';
           toast(`Scanner-Fehler: ${err.message}`, 'err');
@@ -511,11 +627,62 @@ export function renderWeekView(root, { toast, navigate, openModal, closeModal, p
   handleIcs(root.querySelector('#wk-ics-upload'));
   handleIcs(root.querySelector('#wk-ics-upload-2'));
 
-  // Checklist actions + Log-Bar (#1) + Undo Toast (#7)
+  // Checklist actions + 1-Click Day Shift + Drag & Drop + Log-Modal + Undo Toast
   root.querySelectorAll('[data-chk-toggle]').forEach((el) => {
     el.addEventListener('click', () => {
       const updated = toggleChecklistItem(el.getAttribute('data-chk-toggle'));
       if (updated && updated.done && promptLogFromChecklist) promptLogFromChecklist(updated);
+    });
+  });
+  root.querySelectorAll('[data-chk-shift]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const id = btn.getAttribute('data-chk-shift');
+      const delta = Number(btn.getAttribute('data-delta'));
+      const res = shiftChecklistItemByDays(id, delta);
+      if (res.ok) {
+        const targetWd = WEEKDAYS_DE[parseDateStr(res.targetDate).getDay()];
+        toast(`Verschoben auf ${targetWd}, ${fmtDateShort(res.targetDate)}.`, 'ok');
+      }
+    });
+  });
+
+  // Desktop Drag & Drop between days
+  let draggedChkId = null;
+  root.querySelectorAll('[data-drag-chk]').forEach((el) => {
+    el.addEventListener('dragstart', (e) => {
+      draggedChkId = el.getAttribute('data-drag-chk');
+      el.classList.add('dragging');
+      if (e.dataTransfer) {
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', draggedChkId);
+      }
+    });
+    el.addEventListener('dragend', () => {
+      el.classList.remove('dragging');
+      draggedChkId = null;
+      root.querySelectorAll('.day-drop-zone.drag-over').forEach((z) => z.classList.remove('drag-over'));
+    });
+  });
+  root.querySelectorAll('[data-drop-day]').forEach((zone) => {
+    zone.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+      zone.classList.add('drag-over');
+    });
+    zone.addEventListener('dragleave', (e) => {
+      if (!zone.contains(e.relatedTarget)) zone.classList.remove('drag-over');
+    });
+    zone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      zone.classList.remove('drag-over');
+      const id = draggedChkId || e.dataTransfer?.getData('text/plain');
+      const targetDay = zone.getAttribute('data-drop-day');
+      if (!id || !targetDay) return;
+      const res = moveChecklistItemToDate(id, targetDay);
+      if (res.ok) {
+        const wd = WEEKDAYS_DE[parseDateStr(targetDay).getDay()];
+        toast(`Verschoben auf ${wd}, ${fmtDateShort(targetDay)}.`, 'ok');
+      }
     });
   });
   root.querySelectorAll('[data-chk-del]').forEach((btn) => {
@@ -683,18 +850,34 @@ export function renderWeekView(root, { toast, navigate, openModal, closeModal, p
     });
   });
 
-  // Add / Edit Checklist Item Modal
+  // Add / Edit / Quick-Move Checklist Item Modal (with Catalog Blueprint Picker + Quick Day Chips!)
   const openCheckItemModal = (existing = null, defaultDate = today) => {
-    const it = existing || { d: defaultDate, timeLabel: '', title: '', kind: 'l', estMin: 45 };
+    const it = existing || { d: defaultDate, timeLabel: '', title: '', kind: 'l', estMin: 45, catalogId: '' };
+    const dayChips = days.map((d) => `
+      <button type="button" class="chip ${d.d === it.d ? 'active' : ''}" data-pick-day="${d.d}">${d.wd} ${fmtDateShort(d.d)}</button>
+    `).join('');
     openModal(`
       <div class="card-header">
-        <h3 class="card-title">${existing ? 'Punkt bearbeiten' : 'Neuer Checklisten-Punkt'}</h3>
+        <h3 class="card-title">${existing ? 'Punkt bearbeiten / verschieben' : 'Neuer Checklisten-Punkt'}</h3>
         <button class="icon-btn" id="m-close">${icon('x', 15)}</button>
       </div>
       <form id="m-chk-form" class="stack">
+        ${!existing && calibratedCatalog.length ? `
+          <div class="field">
+            <label>Aus Aufgaben-Katalog vorbefüllen (optional)</label>
+            <select class="input" id="mc-cat-pick">
+              <option value="">— Frei eingeben —</option>
+              ${calibratedCatalog.map((c) => `<option value="${esc(c.id)}">${esc(c.subject)} · ${esc(c.title)} (~${c.effectiveMin}m)</option>`).join('')}
+            </select>
+          </div>
+        ` : ''}
         <div class="field"><label>Aufgabe</label><input class="input" id="mc-title" value="${esc(it.title)}" placeholder="z. B. HM: neues VL-Video 1 schauen" required /></div>
+        <div class="field">
+          <label>Schnell auf Wochentag legen</label>
+          <div class="chip-row">${dayChips}</div>
+        </div>
         <div class="field-grid">
-          <div class="field"><label>Tag</label><input type="date" class="input mono" id="mc-date" value="${esc(it.d)}" required /></div>
+          <div class="field"><label>Tag (Datum)</label><input type="date" class="input mono" id="mc-date" value="${esc(it.d)}" required /></div>
           <div class="field"><label>Zeit-Hinweis (opt.)</label><input class="input mono" id="mc-time" value="${esc(it.timeLabel || '')}" placeholder="z. B. 10:45 oder Ab 15:30" /></div>
         </div>
         <div class="field-grid">
@@ -706,23 +889,60 @@ export function renderWeekView(root, { toast, navigate, openModal, closeModal, p
               <option value="p" ${it.kind === 'p' ? 'selected' : ''}>Vorlesung / Orga</option>
             </select>
           </div>
-          <div class="field"><label>Timer-Dauer (min)</label><input type="number" class="input mono" id="mc-est" min="0" max="480" value="${it.estMin || 45}" /></div>
+          <div class="field"><label>Geschätzte Dauer (min)</label><input type="number" class="input mono" id="mc-est" min="0" max="480" value="${it.estMin || 45}" /></div>
         </div>
-        <div class="row" style="justify-content:flex-end;"><button type="submit" class="btn btn-primary btn-sm">Speichern</button></div>
+        <div class="row-between">
+          ${existing ? `<button type="button" class="btn btn-sm" id="mc-to-backlog">In Rückstand schieben</button>` : '<span></span>'}
+          <button type="submit" class="btn btn-primary btn-sm">Speichern</button>
+        </div>
       </form>
     `, (modalEl) => {
       modalEl.querySelector('#m-close')?.addEventListener('click', closeModal);
+      let pickedCatalogId = it.catalogId || '';
+
+      modalEl.querySelector('#mc-cat-pick')?.addEventListener('change', (e) => {
+        const cid = e.target.value;
+        const cat = calibratedCatalog.find((c) => c.id === cid);
+        if (!cat) { pickedCatalogId = ''; return; }
+        pickedCatalogId = cat.id;
+        modalEl.querySelector('#mc-title').value = cat.title;
+        modalEl.querySelector('#mc-kind').value = cat.kind || 'l';
+        modalEl.querySelector('#mc-est').value = cat.effectiveMin;
+      });
+
+      modalEl.querySelectorAll('[data-pick-day]').forEach((chip) => {
+        chip.addEventListener('click', () => {
+          const d = chip.getAttribute('data-pick-day');
+          modalEl.querySelector('#mc-date').value = d;
+          modalEl.querySelectorAll('[data-pick-day]').forEach((c) => c.classList.toggle('active', c === chip));
+        });
+      });
+
+      modalEl.querySelector('#mc-to-backlog')?.addEventListener('click', () => {
+        if (existing) {
+          moveChecklistItemToBacklog(existing.id);
+          closeModal();
+          toast('In den offenen Rückstand verschoben.', 'ok', { undo: true });
+        }
+      });
+
       modalEl.querySelector('#m-chk-form')?.addEventListener('submit', (e) => {
         e.preventDefault();
+        const nextDate = modalEl.querySelector('#mc-date').value;
         const patch = {
-          d: modalEl.querySelector('#mc-date').value,
+          d: nextDate,
           timeLabel: modalEl.querySelector('#mc-time').value.trim(),
           title: modalEl.querySelector('#mc-title').value.trim(),
           kind: modalEl.querySelector('#mc-kind').value,
-          estMin: Number(modalEl.querySelector('#mc-est').value) || 0
+          estMin: Number(modalEl.querySelector('#mc-est').value) || 0,
+          catalogId: pickedCatalogId
         };
-        if (existing) updateChecklistItem(existing.id, patch);
-        else addChecklistItem(patch);
+        if (existing) {
+          if (nextDate !== existing.d) moveChecklistItemToDate(existing.id, nextDate);
+          updateChecklistItem(existing.id, patch);
+        } else {
+          addChecklistItem(patch);
+        }
         closeModal();
       });
     });
@@ -862,4 +1082,79 @@ export function renderWeekView(root, { toast, navigate, openModal, closeModal, p
 
   root.querySelector('#btn-add-module')?.addEventListener('click', () => openModuleModal(null));
   root.querySelectorAll('[data-edit-mod]').forEach((el) => el.addEventListener('click', () => openModuleModal(el.getAttribute('data-edit-mod'))));
+
+  // Task Catalog Blueprint Modal (User can add/edit/delete; AI can only add!)
+  const openCatalogModal = (catId = null) => {
+    const existing = catId ? calibratedCatalog.find((c) => c.id === catId) : null;
+    const c = existing || { id: '', subject: '', title: '', act: 'review', kind: 'l', defaultMin: 60, notes: '' };
+    openModal(`
+      <div class="card-header">
+        <h3 class="card-title">${existing ? 'Katalog-Baustein bearbeiten' : 'Neuer Katalog-Baustein'}</h3>
+        <button class="icon-btn" id="m-close">${icon('x', 15)}</button>
+      </div>
+      ${existing && existing.sampleCount > 0 ? `
+        <div class="xs muted mono" style="margin-bottom:10px;">
+          Bisher ${existing.sampleCount} echte ${existing.sampleCount === 1 ? 'Session' : 'Sessions'} · Ø ${existing.avgRealMin} min
+          ${existing.calibrated ? ' (aktiv für KI-Planung)' : ' (ab 2 Sessions automatisch aktiv)'}
+        </div>
+      ` : ''}
+      <form id="m-cat-form" class="stack">
+        <div class="field-grid">
+          <div class="field"><label>Fach / Bereich</label><input class="input" id="mcat-subj" value="${esc(c.subject)}" placeholder="z. B. HM I, TM I, MKL A" required /></div>
+          <div class="field"><label>Start-Dauer (min)</label><input type="number" class="input mono" id="mcat-min" min="5" max="480" value="${c.defaultMin || 60}" required /></div>
+        </div>
+        <div class="field"><label>Bezeichnung</label><input class="input" id="mcat-title" value="${esc(c.title)}" placeholder="z. B. HM: VL-Video durcharbeiten" required /></div>
+        <div class="field-grid">
+          <div class="field">
+            <label>Tätigkeit (für Auto-Kalibrierung)</label>
+            <select class="input" id="mcat-act">
+              <option value="" ${!c.act ? 'selected' : ''}>Allgemein</option>
+              <option value="video" ${c.act === 'video' ? 'selected' : ''}>VL-Video durcharbeiten</option>
+              <option value="review" ${c.act === 'review' ? 'selected' : ''}>VL nacharbeiten & Ankis</option>
+              <option value="homework" ${c.act === 'homework' ? 'selected' : ''}>Hausaufgabe / Praxis</option>
+              <option value="exam" ${c.act === 'exam' ? 'selected' : ''}>Altklausur / Üben</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Kategorie</label>
+            <select class="input" id="mcat-kind">
+              <option value="l" ${c.kind !== 'p' ? 'selected' : ''}>Lernen</option>
+              <option value="p" ${c.kind === 'p' ? 'selected' : ''}>Orga / Produktiv</option>
+            </select>
+          </div>
+        </div>
+        <div class="field"><label>Notiz für KI (optional)</label><input class="input" id="mcat-notes" value="${esc(c.notes || '')}" placeholder="z. B. ohne Abgabedruck, Folien + Karten" /></div>
+        <div class="row-between">
+          ${existing ? `<button type="button" class="btn btn-sm btn-danger" id="mcat-del">Löschen</button>` : '<span></span>'}
+          <button type="submit" class="btn btn-primary btn-sm">Speichern</button>
+        </div>
+      </form>
+    `, (modalEl) => {
+      modalEl.querySelector('#m-close')?.addEventListener('click', closeModal);
+      modalEl.querySelector('#mcat-del')?.addEventListener('click', () => {
+        store.deleteTaskCatalogItem(existing.id);
+        closeModal();
+        toast('Baustein gelöscht.', '', { undo: true });
+      });
+      modalEl.querySelector('#m-cat-form')?.addEventListener('submit', (e) => {
+        e.preventDefault();
+        store.upsertTaskCatalogItem({
+          id: existing ? existing.id : '',
+          subject: modalEl.querySelector('#mcat-subj').value,
+          title: modalEl.querySelector('#mcat-title').value,
+          act: modalEl.querySelector('#mcat-act').value,
+          kind: modalEl.querySelector('#mcat-kind').value,
+          defaultMin: modalEl.querySelector('#mcat-min').value,
+          notes: modalEl.querySelector('#mcat-notes').value
+        });
+        closeModal();
+        toast('Katalog-Baustein gespeichert.', 'ok');
+      });
+    });
+  };
+
+  root.querySelector('#btn-add-catalog')?.addEventListener('click', () => openCatalogModal(null));
+  root.querySelectorAll('[data-edit-cat]').forEach((btn) => {
+    btn.addEventListener('click', () => openCatalogModal(btn.getAttribute('data-edit-cat')));
+  });
 }

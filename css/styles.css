@@ -533,6 +533,24 @@ button { cursor: pointer; }
   border-color: var(--border);
 }
 
+.check-item.dragging {
+  opacity: 0.45;
+  border-style: dashed;
+  border-color: var(--accent);
+}
+
+.day-drop-zone {
+  border-radius: var(--radius-xs);
+  transition: background 0.14s, outline-color 0.14s;
+  outline: 1.5px dashed transparent;
+  outline-offset: 4px;
+}
+
+.day-drop-zone.drag-over {
+  background: rgba(16, 185, 129, 0.08);
+  outline-color: var(--kit);
+}
+
 .check-item-main {
   display: flex;
   align-items: flex-start;

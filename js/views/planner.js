@@ -47,6 +47,8 @@ export function renderPlannerView(root, { toast, navigate }) {
   const effAnki = anki.estMinutes > 0 ? Math.max(minAnki, anki.estMinutes) : minAnki;
   const openBacklog = (store.state.backlog || []).filter((b) => b.status === 'open' || b.status === 'overdue').length;
   const videoMods = Object.values(store.state.modules).filter((m) => m.attendance === 'video').length;
+  const calCatalog = store.getCalibratedTaskCatalog();
+  const calCount = calCatalog.filter((c) => c.calibrated).length;
   const energyMode = store.state.ai.energyMode || 'normal';
   const chat = store.state.ai.chat || [];
   const hasKey = Boolean(store.state.ai.apiKey && store.state.ai.apiKey.trim().length > 10);
@@ -76,6 +78,7 @@ export function renderPlannerView(root, { toast, navigate }) {
           <span class="pill ${store.state.icsRaw ? 'kit' : 'prod'}">${store.state.icsRaw ? 'KIT-Kalender aktiv' : 'Kein .ics geladen'}</span>
           <span class="pill purple">${videoMods} ${videoMods === 1 ? 'Video-Modul' : 'Video-Module'}</span>
           <span class="pill anki">Anki heute: ${anki.totalNew}B · ${anki.totalLearn}R · ${anki.totalReview}G (~${anki.estMinutes}m · Puffer ${minAnki}m/Tag)</span>
+          <span class="pill">Katalog: ${calCatalog.length} Bausteine${calCount > 0 ? ` (${calCount} kalibriert)` : ''}</span>
           <span class="pill ${openBacklog > 0 ? 'prod' : ''}">${openBacklog} im Rückstand</span>
           <span class="pill">Mindestziel ${fmtMin(store.state.goal)}</span>
           <span class="pill">Frei ab ~${store.state.planningPrefs?.defaultWakeFreeDay || '10:00'}</span>
@@ -114,7 +117,7 @@ export function renderPlannerView(root, { toast, navigate }) {
         </div>
 
         <div class="chat-messages" id="chat-messages">
-          ${chat.length === 0 ? `<div class="msg assistant"><div class="msg-text">Ich kenne deinen KIT-Stundenplan, deine Modul-Regeln (Live vs. Video), deinen aktuellen Anki-Stand und deine echten Lernzeiten.\n\nSchreib einfach, was diese Woche ansteht oder wann du privat unterwegs bist – ich erstelle dir direkt eine abhakbare Uni-Checkliste (tägliche Anki-Reviews werden automatisch über deinen Anki-Sync berechnet und im Tagesbudget reserviert).</div></div>` : chat.map((m, idx) => `<div class="msg ${m.role === 'user' ? 'user' : 'assistant'}"><div class="msg-text">${esc(m.text)}</div>${m.modelUsed ? `<div class="xs soft" style="margin-top:6px;">${esc(m.modelUsed)}${m.usedFallback ? ' (Auto-Fallback)' : ''}</div>` : ''}${m.suggestedRhythm ? `<div class="proposal-card"><div class="row-between" style="margin-bottom:6px;"><strong class="xs mono">VORSCHLAG: RHYTHMUS-ORIENTIERUNG</strong>${m.rhythmApplied ? '<span class="pill kit">Übernommen</span>' : `<button class="btn btn-xs btn-primary" data-apply-rhythm="${idx}">${icon('check', 12)} Übernehmen</button>`}</div><div class="small muted">${esc(m.suggestedRhythm)}</div></div>` : ''}${m.proposal ? `<div class="proposal-card"><div class="row-between" style="margin-bottom:8px;"><strong class="small">${esc(m.proposal.summary)}</strong>${m.applied ? '<span class="pill kit">Übernommen</span>' : `<button class="btn btn-xs btn-primary" data-apply-prop="${idx}">${icon('check', 12)} In Checkliste übernehmen</button>`}</div>${m.proposal.replaceDates?.length ? `<div class="xs muted" style="margin-bottom:6px;">Ersetzt offene Punkte an: ${m.proposal.replaceDates.map(fmtDateShort).join(', ')}</div>` : ''}<div class="entry-list">${(m.proposal.items || []).map((it) => `<div class="entry-row" style="padding:6px 9px;"><span class="small"><strong class="mono">${fmtDateShort(it.d)}${it.timeLabel ? ` · ${esc(it.timeLabel)}` : ''}</strong> — ${esc(it.title)}</span><div class="row" style="gap:4px;">${it.backlogId ? '<span class="pill">Rückstand</span>' : ''}<span class="pill ${it.kind === 'a' ? 'anki' : it.kind === 'p' ? 'prod' : 'learn'}">${it.kind === 'a' ? 'Anki' : it.kind === 'p' ? 'Orga' : 'Lernen'}</span></div></div>`).join('')}</div>${(m.proposal.reminders || []).length ? `<div class="xs muted" style="margin-top:8px;">Vormerken: ${m.proposal.reminders.map(esc).join(' · ')}</div>` : ''}</div>` : ''}</div>`).join('')}
+          ${chat.length === 0 ? `<div class="msg assistant"><div class="msg-text">Ich kenne deinen KIT-Stundenplan, deine Modul-Regeln (Live vs. Video), deinen Aufgaben-Katalog (mit Auto-Kalibrierung), deinen aktuellen Anki-Stand und deine echten Lernzeiten.\n\nSchreib einfach, was diese Woche ansteht oder wann du privat unterwegs bist – ich erstelle dir direkt eine abhakbare Uni-Checkliste (tägliche Anki-Reviews werden automatisch über deinen Anki-Sync berechnet und im Tagesbudget reserviert).</div></div>` : chat.map((m, idx) => `<div class="msg ${m.role === 'user' ? 'user' : 'assistant'}"><div class="msg-text">${esc(m.text)}</div>${m.modelUsed ? `<div class="xs soft" style="margin-top:6px;">${esc(m.modelUsed)}${m.usedFallback ? ' (Auto-Fallback)' : ''}</div>` : ''}${m.suggestedRhythm ? `<div class="proposal-card"><div class="row-between" style="margin-bottom:6px;"><strong class="xs mono">VORSCHLAG: RHYTHMUS-ORIENTIERUNG</strong>${m.rhythmApplied ? '<span class="pill kit">Übernommen</span>' : `<button class="btn btn-xs btn-primary" data-apply-rhythm="${idx}">${icon('check', 12)} Übernehmen</button>`}</div><div class="small muted">${esc(m.suggestedRhythm)}</div></div>` : ''}${m.proposal ? `<div class="proposal-card"><div class="row-between" style="margin-bottom:8px;"><strong class="small">${esc(m.proposal.summary)}</strong>${m.applied ? '<span class="pill kit">Übernommen</span>' : `<button class="btn btn-xs btn-primary" data-apply-prop="${idx}">${icon('check', 12)} Übernehmen</button>`}</div>${m.proposal.replaceDates?.length ? `<div class="xs muted" style="margin-bottom:6px;">Ersetzt offene Punkte an: ${m.proposal.replaceDates.map(fmtDateShort).join(', ')}</div>` : ''}<div class="entry-list">${(m.proposal.items || []).map((it) => `<div class="entry-row" style="padding:6px 9px;"><span class="small"><strong class="mono">${fmtDateShort(it.d)}${it.timeLabel ? ` · ${esc(it.timeLabel)}` : ''}</strong> — ${esc(it.title)}</span><div class="row" style="gap:4px;">${it.estMin ? `<span class="xs soft mono">~${it.estMin}m</span>` : ''}${it.backlogId ? '<span class="pill">Rückstand</span>' : ''}<span class="pill ${it.kind === 'a' ? 'anki' : it.kind === 'p' ? 'prod' : 'learn'}">${it.kind === 'a' ? 'Anki' : it.kind === 'p' ? 'Orga' : 'Lernen'}</span></div></div>`).join('')}</div>${(m.proposal.newCatalogItems || []).length ? `<div class="xs muted" style="margin-top:8px;">+ Neue Katalog-Bausteine: ${m.proposal.newCatalogItems.map((c) => `${esc(c.title)} (~${c.defaultMin}m)`).join(' · ')}</div>` : ''}${(m.proposal.reminders || []).length ? `<div class="xs muted" style="margin-top:8px;">Vormerken: ${m.proposal.reminders.map(esc).join(' · ')}</div>` : ''}</div>` : ''}</div>`).join('')}
           ${isSending ? '<div class="msg assistant muted"><div class="msg-text">Gemini erstellt deinen Plan...</div></div>' : ''}
         </div>
 
@@ -130,7 +133,7 @@ export function renderPlannerView(root, { toast, navigate }) {
           <summary class="card-title" style="cursor:pointer;">${icon('copy', 15)} Gemini-Pro-Bridge (Copy/Paste für dein Gemini-Pro-Abo)</summary>
           <div class="stack" style="margin-top:12px;">
             <p class="xs muted" style="margin:0;">
-              Kopiere deinen kompletten Kontext-Prompt in die Gemini-Pro-App und füge die Antwort (JSON oder fertige <code>── MO, 23.11. ──</code> Checkliste) hier wieder ein.
+              Kopiere deinen kompletten Kontext-Prompt in die Gemini-Pro-App (Plan, Audit oder Wochenrückblick) und füge die Antwort hier wieder ein — Checkliste, Rhythmus-Update und neue Katalog-Bausteine werden automatisch erkannt.
             </p>
             <div class="row">
               <input type="text" id="bridge-wish" class="input" style="flex:1;" placeholder="Dein Wunsch (optional)..." />
@@ -138,9 +141,9 @@ export function renderPlannerView(root, { toast, navigate }) {
               <button class="btn btn-sm" id="btn-bridge-audit">${icon('check', 13)} Audit-Prompt</button>
               <button class="btn btn-sm" id="btn-bridge-review">${icon('activity', 13)} Rückblick-Prompt</button>
             </div>
-            <textarea id="bridge-paste" class="input mono" placeholder="Antwort aus Gemini Pro hier einfügen..."></textarea>
+            <textarea id="bridge-paste" class="input mono" placeholder="Antwort aus Gemini Pro hier einfügen (JSON für Plan / Audit / Rückblick / neue Bausteine oder Text-Checkliste)..."></textarea>
             <div class="row" style="justify-content:flex-end;">
-              <button class="btn btn-primary btn-sm" id="btn-bridge-apply">${icon('check', 13)} In Checkliste übernehmen</button>
+              <button class="btn btn-primary btn-sm" id="btn-bridge-apply">${icon('check', 13)} Antwort übernehmen</button>
             </div>
           </div>
         </details>
@@ -210,7 +213,12 @@ export function renderPlannerView(root, { toast, navigate }) {
         const res = applyProposalToWeek(msg.proposal);
         msg.applied = true;
         store.save();
-        toast(`${res.addedItems} Punkte & ${res.addedReminders} Vormerkungen übernommen.`, 'ok', { undo: true });
+        const parts = [];
+        if (res.addedItems) parts.push(`${res.addedItems} Punkte`);
+        if (res.addedReminders) parts.push(`${res.addedReminders} Vormerkungen`);
+        if (res.addedCatalog) parts.push(`${res.addedCatalog} neue Katalog-Bausteine`);
+        if (res.appliedRhythm) parts.push('Rhythmus-Orientierung');
+        toast(`Übernommen: ${parts.join(', ') || 'Aktualisiert'}.`, 'ok', { undo: true });
       }
     });
   });
@@ -355,11 +363,16 @@ export function renderPlannerView(root, { toast, navigate }) {
     const raw = root.querySelector('#bridge-paste')?.value || '';
     const proposal = extractProposalFromReply(raw);
     if (!proposal) {
-      toast('Kein gültiger Plan erkannt (weder JSON noch Checkliste).', 'err');
+      toast('Kein gültiger Plan, Rückblick oder Baustein erkannt.', 'err');
       return;
     }
     const res = applyProposalToWeek(proposal);
     root.querySelector('#bridge-paste').value = '';
-    toast(`Übernommen: ${res.addedItems} Punkte & ${res.addedReminders} Vormerkungen.`, 'ok', { undo: true });
+    const parts = [];
+    if (res.addedItems) parts.push(`${res.addedItems} Punkte`);
+    if (res.addedReminders) parts.push(`${res.addedReminders} Vormerkungen`);
+    if (res.addedCatalog) parts.push(`${res.addedCatalog} neue Katalog-Bausteine`);
+    if (res.appliedRhythm) parts.push('Rhythmus-Orientierung');
+    toast(`Übernommen: ${parts.join(', ') || 'Aktualisiert'}.`, 'ok', { undo: true });
   });
 }

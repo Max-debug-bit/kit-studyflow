@@ -7,10 +7,12 @@ import {
   toDateStr,
   toTimeStr,
   addDays,
+  getMondayOfWeek,
   parseDateStr,
   timeToMin,
   pad2,
   fmtDateShort,
+  fmtMin,
   WEEKDAYS_DE
 } from './store.js';
 import { expandIcsEventsInRange } from './ics.js';
@@ -148,10 +150,16 @@ export function getChecklistForDay(dStr) {
   return (store.state.checklist || []).filter((c) => c.d === dStr);
 }
 
-export function addChecklistItem({ d, title, timeLabel = '', kind = 'l', estMin = 0, moduleId = '', backlogId = '', source = 'manual' }) {
+export function addChecklistItem({ d, title, timeLabel = '', kind = 'l', estMin = 0, moduleId = '', backlogId = '', catalogId = '', source = 'manual' }) {
   const clean = (title || '').trim();
   if (!clean) return null;
   const validBacklogId = backlogId && store.state.backlog.some((b) => b.id === backlogId) ? backlogId : '';
+  const calibrated = store.getCalibratedTaskCatalog();
+  const matchedCat = catalogId
+    ? calibrated.find((c) => c.id === catalogId)
+    : store.matchCatalogItemForText(clean, '', moduleId);
+  const resolvedCat = matchedCat ? calibrated.find((c) => c.id === matchedCat.id) : null;
+  const explicitMin = Math.max(0, Math.round(Number(estMin) || extractMinutesFromTitle(clean)));
 
   const item = {
     id: `chk_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
@@ -159,9 +167,10 @@ export function addChecklistItem({ d, title, timeLabel = '', kind = 'l', estMin 
     timeLabel: (timeLabel || '').trim(),
     title: clean,
     kind: ['l', 'a', 'p'].includes(kind) ? kind : (/\banki\b/i.test(clean) ? 'a' : 'l'),
-    estMin: Math.max(0, Math.round(Number(estMin) || extractMinutesFromTitle(clean))),
+    estMin: explicitMin || (resolvedCat ? resolvedCat.effectiveMin : 0),
     moduleId: moduleId || '',
     backlogId: validBacklogId,
+    catalogId: resolvedCat ? resolvedCat.id : '',
     done: false,
     source,
     updatedAt: Date.now()
@@ -170,6 +179,147 @@ export function addChecklistItem({ d, title, timeLabel = '', kind = 'l', estMin 
   reconcileBacklogStatus();
   store.save();
   return item;
+}
+
+export function estimateChecklistItemMinutes(item, calibratedCatalog = null) {
+  if (!item) return 0;
+  const cal = calibratedCatalog || store.getCalibratedTaskCatalog();
+  if (item.catalogId) {
+    const hit = cal.find((c) => c.id === item.catalogId);
+    if (hit && hit.effectiveMin > 0) return hit.effectiveMin;
+  }
+  const matched = store.matchCatalogItemForText(item.title || '', '', item.moduleId || '');
+  if (matched) {
+    const hit = cal.find((c) => c.id === matched.id);
+    if (hit && hit.effectiveMin > 0) return hit.effectiveMin;
+  }
+  if (Number(item.estMin) > 0) return Math.round(Number(item.estMin));
+  const extracted = extractMinutesFromTitle(item.title || '');
+  return extracted > 0 ? extracted : 60;
+}
+
+export function moveChecklistItemToDate(id, targetDateStr) {
+  const item = store.state.checklist.find((x) => x.id === id);
+  if (!item || !targetDateStr || item.d === targetDateStr) return { ok: false };
+  const oldDate = item.d;
+  if (targetDateStr < oldDate && !item.pulledFromDate) {
+    item.pulledFromDate = oldDate;
+  } else if (item.pulledFromDate && targetDateStr >= item.pulledFromDate) {
+    delete item.pulledFromDate;
+  }
+  item.d = targetDateStr;
+  item.updatedAt = Date.now();
+  reconcileBacklogStatus();
+  store.save();
+  return { ok: true, item, oldDate, targetDate: targetDateStr, estMin: estimateChecklistItemMinutes(item) };
+}
+
+export function shiftChecklistItemByDays(id, deltaDays) {
+  const item = store.state.checklist.find((x) => x.id === id);
+  if (!item) return { ok: false };
+  return moveChecklistItemToDate(id, addDays(item.d, deltaDays));
+}
+
+export function moveChecklistItemToBacklog(id) {
+  const item = store.state.checklist.find((x) => x.id === id);
+  if (!item) return null;
+  store.pushUndo('In Rückstand verschoben');
+  if (!item.backlogId) {
+    addBacklogItem({
+      title: item.title,
+      moduleId: item.moduleId || '',
+      kind: item.kind || 'l',
+      estMin: estimateChecklistItemMinutes(item)
+    });
+  }
+  store.markDeleted(id);
+  store.state.checklist = store.state.checklist.filter((x) => x.id !== id);
+  reconcileBacklogStatus();
+  store.save();
+  return true;
+}
+
+export function getWeekAheadImpact(todayStr = toDateStr()) {
+  const monday = getMondayOfWeek(todayStr);
+  const sunday = addDays(monday, 6);
+  const tomorrow = addDays(todayStr, 1);
+  const cal = store.getCalibratedTaskCatalog();
+  const weekItems = (store.state.checklist || []).filter((c) => c.d >= monday && c.d <= sunday);
+
+  let todayOpenMin = 0;
+  let todayDoneMin = 0;
+  let restWeekOpenMin = 0;
+  let restWeekOpenCount = 0;
+  let boughtForwardMin = 0;
+  let boughtForwardCount = 0;
+
+  const dayLoads = {};
+  for (let d = tomorrow; d <= sunday; d = addDays(d, 1)) {
+    const wd = WEEKDAYS_DE[parseDateStr(d).getDay()];
+    dayLoads[d] = { d, wd, shortDate: fmtDateShort(d), totalOpenMin: 0, count: 0 };
+  }
+
+  for (const it of weekItems) {
+    const mins = estimateChecklistItemMinutes(it, cal);
+    if (it.d === todayStr) {
+      if (it.done) todayDoneMin += mins;
+      else todayOpenMin += mins;
+    } else if (it.d > todayStr && !it.done) {
+      restWeekOpenMin += mins;
+      restWeekOpenCount++;
+      if (dayLoads[it.d]) {
+        dayLoads[it.d].totalOpenMin += mins;
+        dayLoads[it.d].count++;
+      }
+    }
+
+    // Track "gekaufte Freizeit" (items pulled forward from a later date OR already checked off in advance)
+    if (it.done && ((it.pulledFromDate && it.pulledFromDate > it.d) || it.d > todayStr)) {
+      boughtForwardMin += mins;
+      boughtForwardCount++;
+    }
+  }
+
+  // Pick top 3 upcoming open tasks (nearest days first, prioritizing impactful ones)
+  const upcomingOpen = weekItems
+    .filter((it) => it.d > todayStr && !it.done)
+    .sort((a, b) => a.d.localeCompare(b.d) || estimateChecklistItemMinutes(b, cal) - estimateChecklistItemMinutes(a, cal))
+    .slice(0, 3)
+    .map((it) => {
+      const estMin = estimateChecklistItemMinutes(it, cal);
+      const load = dayLoads[it.d] || { wd: WEEKDAYS_DE[parseDateStr(it.d).getDay()], shortDate: fmtDateShort(it.d), totalOpenMin: estMin };
+      const dayBeforeMin = load.totalOpenMin;
+      const dayAfterMin = Math.max(0, dayBeforeMin - estMin);
+      const freesWholeDay = dayAfterMin === 0;
+      const impactText = freesWholeDay
+        ? `${load.wd} (${load.shortDate}) wird dadurch komplett frei!`
+        : `${load.wd} (${load.shortDate}): ${fmtMin(dayBeforeMin)} → ${fmtMin(dayAfterMin)} (-${fmtMin(estMin)})`;
+      return {
+        id: it.id,
+        title: it.title,
+        d: it.d,
+        wd: load.wd,
+        shortDate: load.shortDate,
+        estMin,
+        dayBeforeMin,
+        dayAfterMin,
+        freesWholeDay,
+        impactText
+      };
+    });
+
+  return {
+    monday,
+    sunday,
+    todayOpenMin,
+    todayDoneMin,
+    restWeekOpenMin,
+    restWeekOpenCount,
+    boughtForwardMin,
+    boughtForwardCount,
+    dayLoads,
+    candidates: upcomingOpen
+  };
 }
 
 export function toggleChecklistItem(id) {
@@ -647,15 +797,22 @@ export function applyParsedChecklist({ items, dayNotes, reminders, replaceDates 
       if (alreadyActive) continue;
     }
 
+    const calList = store.getCalibratedTaskCatalog();
+    const explicitCat = it.catalogId ? calList.find((c) => c.id === it.catalogId) : null;
+    const matchedCat = explicitCat || store.matchCatalogItemForText(it.title || '', '', it.moduleId || '');
+    const resolvedCat = matchedCat ? calList.find((c) => c.id === matchedCat.id) : null;
+    const explicitEst = Math.max(0, Math.round(Number(it.estMin) || extractMinutesFromTitle(it.title)));
+
     store.state.checklist.push({
       id: `chk_${nowTs}_${addedItems}_${Math.random().toString(36).slice(2, 6)}`,
       d: it.d,
       timeLabel: it.timeLabel || '',
       title: it.title,
       kind: ['l', 'a', 'p'].includes(it.kind) ? it.kind : (/\banki/i.test(it.title) ? 'a' : 'l'),
-      estMin: Math.max(0, Math.round(Number(it.estMin) || extractMinutesFromTitle(it.title))),
+      estMin: explicitEst || (resolvedCat ? resolvedCat.effectiveMin : 0),
       moduleId: it.moduleId || '',
       backlogId,
+      catalogId: resolvedCat ? resolvedCat.id : '',
       done: false,
       source: 'ai',
       updatedAt: nowTs
