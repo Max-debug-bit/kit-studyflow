@@ -169,6 +169,7 @@ export function buildPlanningContext(weekOffset = 0) {
       title: c.title,
       kind: c.kind,
       estMin: estimateChecklistItemMinutes(c, calCatalog),
+      ...(c.loggedMin > 0 ? { bereitsGeloggtMin: c.loggedMin } : {}),
       done: c.done,
       ...(c.backlogId ? { backlogId: c.backlogId } : {})
     }));

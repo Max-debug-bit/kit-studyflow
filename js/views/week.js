@@ -172,6 +172,8 @@ export function renderWeekView(root, { toast, navigate, openModal, closeModal, p
               <div class="check-list">
                 ${day.items.map((it) => {
                   const est = estimateChecklistItemMinutes(it, calibratedCatalog);
+                  const logged = Math.max(0, Number(it.loggedMin) || 0);
+                  const remEst = logged > 0 && est > logged ? est - logged : est;
                   return `
                   <div class="check-item ${it.done ? 'done' : ''}" draggable="true" data-drag-chk="${esc(it.id)}">
                     <div class="check-item-main" data-chk-toggle="${esc(it.id)}">
@@ -179,7 +181,7 @@ export function renderWeekView(root, { toast, navigate, openModal, closeModal, p
                       <div class="row" style="gap:8px;flex:1;">
                         ${it.timeLabel ? `<span class="check-time">${esc(it.timeLabel)}</span>` : ''}
                         <span class="check-text">${esc(it.title)}</span>
-                        ${!it.done && est > 0 ? `<span class="xs soft mono">~${fmtMin(est)}</span>` : ''}
+                        ${logged > 0 ? `<span class="pill learn mono" title="Bereits teilgeloggte Lernzeit">${!it.done && est > 0 && logged < est ? `${logged}m / ~${est}m` : `${logged}m geloggt`}</span>` : (!it.done && est > 0 ? `<span class="xs soft mono">~${fmtMin(est)}</span>` : '')}
                         ${it.kind === 'a' ? '<span class="pill anki">Anki</span>' : ''}
                         ${it.backlogId ? '<span class="pill">Rückstand</span>' : ''}
                         ${it.pulledFromDate && it.pulledFromDate > it.d ? '<span class="pill kit">Vorgezogen</span>' : ''}
@@ -187,9 +189,10 @@ export function renderWeekView(root, { toast, navigate, openModal, closeModal, p
                     </div>
                     <div class="check-actions">
                       <span class="desktop-only" style="gap:4px;align-items:center;">
+                        ${!it.done ? `<button class="btn btn-xs" data-chk-partial="${esc(it.id)}" title="Teilzeit loggen (Aufgabe bleibt offen)">+ Zeit</button>` : ''}
                         ${!it.done ? `<button class="btn btn-xs btn-ghost" data-chk-shift="${esc(it.id)}" data-delta="-1" title="1 Tag vorziehen">${icon('arrowLeft', 12)}</button>` : ''}
                         ${!it.done ? `<button class="btn btn-xs btn-ghost" data-chk-shift="${esc(it.id)}" data-delta="1" title="1 Tag nach hinten">${icon('arrowRight', 12)}</button>` : ''}
-                        ${!it.done ? `<button class="btn btn-xs btn-ghost" data-chk-timer="${esc(it.id)}" data-kind="${esc(it.kind)}" data-dur="${est || 45}" title="Timer starten">${icon('play', 12)}</button>` : ''}
+                        ${!it.done ? `<button class="btn btn-xs btn-ghost" data-chk-timer="${esc(it.id)}" data-kind="${esc(it.kind)}" data-dur="${remEst || 45}" title="Timer starten">${icon('play', 12)}</button>` : ''}
                         <button class="btn btn-xs btn-ghost" data-chk-edit="${esc(it.id)}" title="Bearbeiten / Auf anderen Tag legen">${icon('edit', 12)}</button>
                         <button class="btn btn-xs btn-ghost" data-chk-del="${esc(it.id)}" title="Löschen">${icon('x', 13)}</button>
                       </span>
@@ -634,6 +637,12 @@ export function renderWeekView(root, { toast, navigate, openModal, closeModal, p
       if (updated && updated.done && promptLogFromChecklist) promptLogFromChecklist(updated);
     });
   });
+  root.querySelectorAll('[data-chk-partial]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const it = store.state.checklist.find((x) => x.id === btn.getAttribute('data-chk-partial'));
+      if (it && promptLogFromChecklist) promptLogFromChecklist(it, { partial: true });
+    });
+  });
   root.querySelectorAll('[data-chk-shift]').forEach((btn) => {
     btn.addEventListener('click', () => {
       const id = btn.getAttribute('data-chk-shift');
@@ -997,6 +1006,7 @@ export function renderWeekView(root, { toast, navigate, openModal, closeModal, p
         <div class="xs muted mono" style="margin-bottom:12px;">${wd}, ${fmtDateShort(it.d)}${est > 0 ? ` · ~${fmtMin(est)}` : ''}</div>
         <div class="stack" style="gap:6px;">
           ${!it.done ? `
+            <button type="button" class="menu-item" id="cm-partial">${icon('clock', 15)} + Teilzeit loggen (bleibt offen)</button>
             <button type="button" class="menu-item" id="cm-done">${icon('check', 15)} Abhaken &amp; Zeit loggen</button>
             <button type="button" class="menu-item" id="cm-timer">${icon('play', 15)} Mit Timer starten (~${est || 45}m)</button>
             <button type="button" class="menu-item" id="cm-prev">${icon('arrowLeft', 15)} 1 Tag vorziehen</button>
@@ -1012,6 +1022,10 @@ export function renderWeekView(root, { toast, navigate, openModal, closeModal, p
         </div>
       `, (modalEl) => {
         modalEl.querySelector('#m-close')?.addEventListener('click', closeModal);
+        modalEl.querySelector('#cm-partial')?.addEventListener('click', () => {
+          closeModal();
+          if (promptLogFromChecklist) promptLogFromChecklist(it, { partial: true });
+        });
         modalEl.querySelector('#cm-done')?.addEventListener('click', () => {
           closeModal();
           const updated = toggleChecklistItem(it.id);

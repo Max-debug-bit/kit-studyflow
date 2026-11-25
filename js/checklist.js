@@ -309,9 +309,11 @@ export function getWeekAheadImpact(todayStr = toDateStr()) {
   }
 
   for (const it of windowItems) {
-    const mins = estimateChecklistItemMinutes(it, cal);
+    const fullMins = estimateChecklistItemMinutes(it, cal);
+    const logged = Math.max(0, Number(it.loggedMin) || 0);
+    const mins = !it.done && logged > 0 ? Math.max(0, fullMins - logged) : fullMins;
     if (it.d === todayStr) {
-      if (it.done) todayDoneMin += mins;
+      if (it.done) todayDoneMin += fullMins;
       else todayOpenMin += mins;
     } else if (it.d > todayStr && it.d <= horizonEnd && !it.done) {
       restWeekOpenMin += mins;
@@ -324,7 +326,7 @@ export function getWeekAheadImpact(todayStr = toDateStr()) {
 
     // Track "gekaufte Freizeit" (items pulled forward from a later date OR already checked off in advance)
     if (it.done && ((it.pulledFromDate && it.pulledFromDate > it.d) || it.d > todayStr)) {
-      boughtForwardMin += mins;
+      boughtForwardMin += fullMins;
       boughtForwardCount++;
     }
   }
@@ -381,6 +383,18 @@ export function getWeekAheadImpact(todayStr = toDateStr()) {
     dayLoads,
     candidates: upcomingOpen
   };
+}
+
+export function recordChecklistPartialProgress(id, addedMin, { save = false } = {}) {
+  if (!id) return null;
+  const delta = Math.round(Number(addedMin) || 0);
+  if (delta <= 0) return null;
+  const item = store.state.checklist.find((x) => x.id === id);
+  if (!item) return null;
+  item.loggedMin = (Number(item.loggedMin) || 0) + delta;
+  item.updatedAt = Date.now();
+  if (save) store.save();
+  return item;
 }
 
 export function toggleChecklistItem(id) {

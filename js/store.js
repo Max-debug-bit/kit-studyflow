@@ -726,7 +726,7 @@ class Store {
     }
   }
 
-  addEntry({ id = null, d, t, m, k, mod = '', act = '', note = '', sessionMin = 0, catalogId = '', save = true }) {
+  addEntry({ id = null, d, t, m, k, mod = '', act = '', note = '', sessionMin = 0, catalogId = '', partial = false, taskTotalMin = 0, save = true }) {
     const minutes = Math.round(Number(m) || 0);
     if (minutes <= 0) return { ok: false, message: 'Bitte mindestens 1 Minute eingeben.' };
     if (id !== null && id !== undefined && id !== '') {
@@ -760,6 +760,8 @@ class Store {
     if (resolvedCatalogId) entry.catalogId = resolvedCatalogId;
     if (note && note.trim()) entry.note = note.trim();
     if (realBlockMin > 0 && (mod || act || resolvedCatalogId || (note && note.trim()))) entry.blockMin = realBlockMin;
+    if (partial) entry.partial = true;
+    if (taskTotalMin > 0) entry.taskTotalMin = Math.round(Number(taskTotalMin));
 
     this.state.e.push(entry);
     this.invalidateCaches();
@@ -1044,7 +1046,11 @@ class Store {
     if (st.planBlockId) {
       const nowTs = Date.now();
       const chk = this.state.checklist.find((c) => c.id === st.planBlockId);
-      if (chk) { chk.done = true; chk.updatedAt = nowTs; }
+      if (chk) {
+        chk.loggedMin = (Number(chk.loggedMin) || 0) + minutes;
+        chk.done = true;
+        chk.updatedAt = nowTs;
+      }
       if (this._reconcileHook) this._reconcileHook({ todayStr: toDateStr() });
     }
 
@@ -1441,11 +1447,13 @@ class Store {
         }
       }
 
-      if (x.mod && realDur >= 10 && realDur <= 420) {
+      // Skip partial (unfinished) chunks for single-task P75 calibration; use full taskTotalMin when finished
+      const calDur = Number(x.taskTotalMin || realDur || 0);
+      if (!x.partial && x.mod && calDur >= 10 && calDur <= 420) {
         const actKey = x.act || (this.state.modules[x.mod]?.attendance === 'video' ? 'video' : 'review');
         const key = `${x.mod}::${actKey}`;
         if (!buckets[key]) buckets[key] = { modId: x.mod, act: actKey, samples: [] };
-        buckets[key].samples.push(realDur);
+        buckets[key].samples.push(calDur);
       }
     }
 
@@ -1558,8 +1566,9 @@ class Store {
 
     for (const x of (this.state.e || [])) {
       if (x.k !== 'l' && x.k !== 'a') continue;
-      // Only count actual per-task durations (blockMin or sum-mode m)
-      const dur = Number(x.blockMin || (this.state.mode === 'sum' ? x.m : 0) || 0);
+      if (x.partial) continue; // Do not skew single-task P75 downward with unfinished partial chunks
+      // Only count actual per-task durations (taskTotalMin for multi-session tasks, else blockMin or sum-mode m)
+      const dur = Number(x.taskTotalMin || x.blockMin || (this.state.mode === 'sum' ? x.m : 0) || 0);
       if (dur < 10 || dur > 420) continue;
 
       let cid = x.catalogId && samplesById[x.catalogId] ? x.catalogId : '';

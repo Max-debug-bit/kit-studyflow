@@ -3,7 +3,7 @@
 
 import { store, toDateStr, toTimeStr, fmtDateShort, parseDateStr, WEEKDAYS_DE, escapeHtml } from './store.js';
 import { scheduleAutoSync, flushPendingSync, syncNow, pullFromGist, isGistConfigured, onSyncStatusChange } from './sync.js';
-import { syncDayLecturesToProductive, syncRecentLecturesToProductive, reconcileBacklogStatus, inferMetaFromChecklistItem, estimateChecklistItemMinutes } from './checklist.js';
+import { syncDayLecturesToProductive, syncRecentLecturesToProductive, reconcileBacklogStatus, inferMetaFromChecklistItem, estimateChecklistItemMinutes, recordChecklistPartialProgress } from './checklist.js';
 import { decodePairingCode, isPinProtectedPairingCode } from './qr.js';
 import { icon } from './icons.js';
 import { renderTodayView, cleanupTodayView } from './views/today.js';
@@ -138,14 +138,15 @@ function closeModal() {
 
 // ---------- Checklist -> Lernzeit-Brücke (#1, without Timer!) ----------
 
-function promptLogFromChecklist(item) {
-  if (!item || !item.done) return;
+function promptLogFromChecklist(item, { partial = false } = {}) {
+  if (!item || (!partial && !item.done)) return;
 
   const meta = inferMetaFromChecklistItem(item);
   const today = toDateStr();
   const isPastItem = Boolean(item.d && item.d < today);
   const kindLabels = { l: 'Lernzeit', a: 'Anki-Lernzeit', p: 'Vorlesung / Produktiv' };
   const actLabels = { '': 'Allgemein', video: 'Video', review: 'Nacharbeit', homework: 'HA', exam: 'Klausur/Üben', anki: 'Anki', prod: 'Vorlesung' };
+  const prevLoggedMin = Math.max(0, Number(item.loggedMin) || 0);
 
   // Default to real task duration ('add'), with 1-click switch to Focus-Friend daily total ('total').
   // Input starts EMPTY — 1-Tap chips save immediately without blindly pre-filling the input!
@@ -166,8 +167,9 @@ function promptLogFromChecklist(item) {
   const estMin = item.isAnkiDaily
     ? (store.state.anki.minDailyAnkiMin || 30)
     : estimateChecklistItemMinutes(item, calibratedCatalog);
-  const basePresets = item.isAnkiDaily ? [15, 20, 30, 45] : [30, 45, 60, 90];
-  const showEstChip = !item.isAnkiDaily && estMin > 0;
+  const remainingEstMin = prevLoggedMin > 0 && estMin > prevLoggedMin ? estMin - prevLoggedMin : estMin;
+  const basePresets = item.isAnkiDaily ? [15, 20, 30, 45] : partial ? [15, 30, 45, 60, 90] : [30, 45, 60, 90];
+  const showEstChip = !item.isAnkiDaily && remainingEstMin > 0 && !basePresets.includes(remainingEstMin);
 
   const autoModName = meta.mod && store.state.modules[meta.mod] ? store.state.modules[meta.mod].shortName : 'Allgemein';
   const autoSummaryParts = [kindLabels[activeKind]];
@@ -176,25 +178,37 @@ function promptLogFromChecklist(item) {
   if (autoCatObj) autoSummaryParts.push(autoCatObj.title);
   const detailsSummaryText = autoSummaryParts.join(' · ');
 
+  const modalTitle = partial
+    ? `${icon('clock', 15)} Teilzeit loggen (bleibt offen)`
+    : `${icon('check', 15)} Wie lange hat das gedauert?`;
+
+  const modalSubtitle = partial
+    ? (prevLoggedMin > 0
+        ? `Bereits teilgeloggt: ${prevLoggedMin} min${estMin > 0 ? ` von ~${estMin} min` : ''}. Deine neue Zeit wird addiert — die Aufgabe bleibt danach offen.`
+        : 'Zeit wird direkt gebucht und als Teilfortschritt angezeigt — die Aufgabe bleibt offen, bis du sie fertig abhakst.')
+    : item.isAnkiDaily
+      ? `Tippe direkt eine Zeit an oder gib Minuten ein${item.remainingCards > 0 ? ` (${item.remainingCards} Karten bleiben für später)` : ''}.`
+      : prevLoggedMin > 0
+        ? `Bereits teilgeloggt: ${prevLoggedMin} min — trage nur noch die restliche Zeit dieser letzten Runde ein.`
+        : '1 Tipp auf eine Dauer speichert sofort — oder eigene Minuten / Focus-Friend Stand eintragen.';
+
   openModal(`
     <div class="card-header">
-      <h3 class="card-title">${icon('check', 15)} Wie lange hat das gedauert?</h3>
+      <h3 class="card-title">${modalTitle}</h3>
       <button class="icon-btn" id="qlm-close" type="button">${icon('x', 15)}</button>
     </div>
     <div class="small" style="font-weight:620;margin-bottom:4px;">${escapeHtml(item.title)}</div>
     <div class="xs muted" style="margin-bottom:10px;">
-      ${item.isAnkiDaily
-        ? `Tippe direkt eine Zeit an oder gib Minuten ein${item.remainingCards > 0 ? ` (${item.remainingCards} Karten bleiben für später)` : ''}.`
-        : '1 Tipp auf eine Dauer speichert sofort — oder eigene Minuten / Focus-Friend Stand eintragen.'}
+      ${modalSubtitle}
     </div>
     <form id="qlm-form" class="stack">
       <div id="qlm-chips-wrap" class="quick-dur-chips">
         ${basePresets.map((m) => `<button type="button" class="quick-dur-chip" data-quick-min="${m}">${m} m</button>`).join('')}
-        ${showEstChip ? `<button type="button" class="quick-dur-chip est" data-quick-min="${estMin}" title="Plan- / Katalog-Schätzung direkt speichern">~${estMin} m</button>` : ''}
+        ${showEstChip ? `<button type="button" class="quick-dur-chip est" data-quick-min="${remainingEstMin}" title="${prevLoggedMin > 0 ? 'Geschätzte Restzeit direkt speichern' : 'Plan- / Katalog-Schätzung direkt speichern'}">${prevLoggedMin > 0 ? `~Rest ${remainingEstMin} m` : `~${remainingEstMin} m`}</button>` : ''}
       </div>
 
       <div class="row-between" style="gap:8px;">
-        <div class="segmented" title="Dauer = Minuten dieser Aufgabe · Focus-Friend Stand = Gesamtwert aus Focus Friend">
+        <div class="segmented" title="Dauer = Minuten dieser Runde · Focus-Friend Stand = Gesamtwert aus Focus Friend">
           <button type="button" data-qlm="add" class="active">Dauer (min)</button>
           <button type="button" data-qlm="total">Focus-Friend Stand</button>
         </div>
@@ -261,7 +275,15 @@ function promptLogFromChecklist(item) {
       </details>
 
       <div class="row" style="justify-content:flex-start;">
-        <button type="button" class="btn btn-sm btn-ghost" id="qlm-skip">${item.isAnkiDaily && item.alreadyLoggedMin > 0 ? `Ohne neue Zeit (${item.alreadyLoggedMin} min behalten)` : 'Ohne Zeit abhaken'}</button>
+        <button type="button" class="btn btn-sm btn-ghost" id="qlm-skip">
+          ${partial
+            ? 'Abbrechen'
+            : item.isAnkiDaily && item.alreadyLoggedMin > 0
+              ? `Ohne neue Zeit (${item.alreadyLoggedMin} min behalten)`
+              : prevLoggedMin > 0
+                ? `Fertig (bereits ${prevLoggedMin} min geloggt)`
+                : 'Ohne Zeit abhaken'}
+        </button>
       </div>
     </form>
   `, (modalEl) => {
@@ -367,6 +389,7 @@ function promptLogFromChecklist(item) {
       }
       const finalAct = activeKind === 'a' ? 'anki' : activeKind === 'p' ? '' : actSel.value;
       const chosenCat = catSel?.value || autoCatId || '';
+      const taskTotalMin = !partial && prevLoggedMin > 0 ? prevLoggedMin + sessionMin : 0;
       const res = store.addEntry({
         d: targetDate,
         t: toTimeStr(),
@@ -375,20 +398,32 @@ function promptLogFromChecklist(item) {
         mod: modSel.value,
         act: finalAct,
         catalogId: activeKind === 'a' ? '' : chosenCat,
-        note: item.title,
-        sessionMin
+        note: partial ? `${item.title} (Teilfortschritt)` : item.title,
+        sessionMin,
+        partial,
+        taskTotalMin,
+        save: false
       });
+      if (res.ok && !item.isAnkiDaily && item.id) {
+        recordChecklistPartialProgress(item.id, sessionMin, { save: false });
+      }
+      store.save();
       closeModal();
-      const wasPulled = (item.pulledFromDate && item.pulledFromDate > (item.d || today)) || (item.d && item.d > today);
+      const newLoggedTotal = prevLoggedMin + sessionMin;
+      const wasPulled = !partial && ((item.pulledFromDate && item.pulledFromDate > (item.d || today)) || (item.d && item.d > today));
       const relievedDate = item.pulledFromDate || (item.d && item.d > today ? item.d : '');
       const relievedLabel = relievedDate ? `${WEEKDAYS_DE[parseDateStr(relievedDate).getDay()]} (${fmtDateShort(relievedDate)})` : 'deine Restwoche';
       toast(
         res.ok
-          ? (wasPulled
-              ? `Stark vorgearbeitet! +${sessionMin} min gespeichert — ${relievedLabel} ist jetzt spürbar leichter.`
-              : modeUsed === 'total'
-                ? `Stand ${totalToRecord} min (+${sessionMin} min) für „${item.title}“ gespeichert.`
-                : `+${sessionMin} min für „${item.title}“ gespeichert (Stand: ${totalToRecord} min).`)
+          ? (partial
+              ? `Teilzeit +${sessionMin} min für „${item.title}“ gespeichert (gesamt ${newLoggedTotal} min · bleibt offen).`
+              : wasPulled
+                ? `Stark vorgearbeitet! +${sessionMin} min gespeichert — ${relievedLabel} ist jetzt spürbar leichter.`
+                : modeUsed === 'total'
+                  ? `Stand ${totalToRecord} min (+${sessionMin} min) für „${item.title}“ gespeichert.`
+                  : prevLoggedMin > 0
+                    ? `+${sessionMin} min für „${item.title}“ gespeichert (Aufgabe gesamt: ${newLoggedTotal} min).`
+                    : `+${sessionMin} min für „${item.title}“ gespeichert (Stand: ${totalToRecord} min).`)
           : res.message,
         res.ok ? 'ok' : 'err'
       );
@@ -432,7 +467,11 @@ function promptLogFromChecklist(item) {
     modalEl.querySelector('#qlm-close')?.addEventListener('click', closeModal);
     modalEl.querySelector('#qlm-skip')?.addEventListener('click', () => {
       closeModal();
-      toast(`„${item.title}“ abgehakt (ohne Zeit-Eintrag).`);
+      if (!partial) {
+        toast(prevLoggedMin > 0
+          ? `„${item.title}“ abgehakt (${prevLoggedMin} min bereits geloggt).`
+          : `„${item.title}“ abgehakt (ohne Zeit-Eintrag).`);
+      }
     });
 
     modalEl.querySelector('#qlm-form')?.addEventListener('submit', (e) => {

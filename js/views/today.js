@@ -255,6 +255,8 @@ export function renderTodayView(root, ctx) {
         <div class="check-list">
           ${todayItems.map((it) => {
             const est = estimateChecklistItemMinutes(it, calibratedCatalog);
+            const logged = Math.max(0, Number(it.loggedMin) || 0);
+            const remEst = logged > 0 && est > logged ? est - logged : est;
             return `
             <div class="check-item ${it.done ? 'done' : ''}">
               <div class="check-item-main" data-chk-toggle="${esc(it.id)}">
@@ -262,17 +264,19 @@ export function renderTodayView(root, ctx) {
                 <div class="row" style="gap:8px;flex:1;">
                   ${it.timeLabel ? `<span class="check-time">${esc(it.timeLabel)}</span>` : ''}
                   <span class="check-text">${esc(it.title)}</span>
+                  ${logged > 0 ? `<span class="pill learn mono" title="Bereits teilgeloggte Lernzeit">${!it.done && est > 0 && logged < est ? `${logged}m / ~${est}m` : `${logged}m geloggt`}</span>` : ''}
                   ${it.kind === 'a' ? '<span class="pill anki">Anki</span>' : ''}
                   ${it.pulledFromDate && it.pulledFromDate > today ? `<span class="pill kit" title="Vorgezogen von ${fmtDateShort(it.pulledFromDate)}">Vorgezogen</span>` : ''}
                 </div>
               </div>
               <div class="check-actions">
+                ${!it.done ? `<button class="btn btn-xs" data-chk-partial="${esc(it.id)}" title="Teilzeit loggen (Aufgabe bleibt offen)">+ Zeit</button>` : ''}
                 <span class="desktop-only" style="gap:4px;align-items:center;">
                   ${!it.done ? `<button class="btn btn-xs btn-ghost" data-chk-tomorrow="${esc(it.id)}" title="Auf morgen verschieben">${icon('arrowRight', 12)}</button>` : ''}
-                  ${!it.done ? `<button class="btn btn-xs btn-ghost" data-chk-timer="${esc(it.id)}" data-kind="${esc(it.kind)}" data-dur="${est || 45}" title="Mit Timer starten (~${est || 45} min)">${icon('play', 12)}</button>` : ''}
+                  ${!it.done ? `<button class="btn btn-xs btn-ghost" data-chk-timer="${esc(it.id)}" data-kind="${esc(it.kind)}" data-dur="${remEst || 45}" title="Mit Timer starten (~${remEst || 45} min)">${icon('play', 12)}</button>` : ''}
                   <button class="btn btn-xs btn-ghost" data-chk-del="${esc(it.id)}" title="Entfernen">${icon('x', 13)}</button>
                 </span>
-                <button type="button" class="btn btn-xs btn-ghost mobile-only" data-chk-menu="${esc(it.id)}" data-dur="${est || 45}" aria-label="Aktionen">•••</button>
+                <button type="button" class="btn btn-xs btn-ghost mobile-only" data-chk-menu="${esc(it.id)}" data-dur="${remEst || 45}" aria-label="Aktionen">•••</button>
               </div>
             </div>
           `;
@@ -894,6 +898,13 @@ export function renderTodayView(root, ctx) {
     });
   });
 
+  root.querySelectorAll('[data-chk-partial]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const it = store.state.checklist.find((x) => x.id === btn.getAttribute('data-chk-partial'));
+      if (it && promptLogFromChecklist) promptLogFromChecklist(it, { partial: true });
+    });
+  });
+
   // Mobile safe action menu (•••) so thumb taps never accidentally hit Delete (×)
   root.querySelectorAll('[data-chk-menu]').forEach((btn) => {
     btn.addEventListener('click', () => {
@@ -908,12 +919,17 @@ export function renderTodayView(root, ctx) {
         </div>
         <div class="small" style="font-weight:600;margin-bottom:12px;">${esc(it.title)}</div>
         <div class="stack" style="gap:8px;">
-          ${!it.done ? `<button type="button" class="btn btn-primary" id="tm-timer">${icon('play', 14)} Fokus-Timer starten (~${dur} min)</button>` : ''}
+          ${!it.done ? `<button type="button" class="btn btn-primary" id="tm-partial">${icon('clock', 14)} + Teilzeit loggen (bleibt offen)</button>` : ''}
+          ${!it.done ? `<button type="button" class="btn" id="tm-timer">${icon('play', 14)} Fokus-Timer starten (~${dur} min)</button>` : ''}
           ${!it.done ? `<button type="button" class="btn" id="tm-tomorrow">${icon('arrowRight', 14)} Auf morgen (${fmtDateShort(tomorrow)}) verschieben</button>` : ''}
           <button type="button" class="btn btn-danger" id="tm-del">${icon('x', 14)} Aufgabe löschen</button>
         </div>
       `, (modalEl) => {
         modalEl.querySelector('#tm-close')?.addEventListener('click', closeModal);
+        modalEl.querySelector('#tm-partial')?.addEventListener('click', () => {
+          closeModal();
+          if (promptLogFromChecklist) promptLogFromChecklist(it, { partial: true });
+        });
         modalEl.querySelector('#tm-timer')?.addEventListener('click', () => {
           closeModal();
           startTimerForChecklistItem(id, it.kind, dur);
