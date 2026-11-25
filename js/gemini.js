@@ -85,7 +85,7 @@ export function buildPlanningContext(weekOffset = 0) {
   const todayBreak = store.getDayBreakdown(todayStr);
   const minDailyAnki = Math.max(10, Number(store.state.anki.minDailyAnkiMin) || 30);
   const ankiSyncedToday = Boolean(anki.lastSyncAt && toDateStr(new Date(anki.lastSyncAt)) === todayStr);
-  const ankiDoneToday = store.isAnkiDoneDay(todayStr, anki.totalDue);
+  const ankiDoneToday = store.isAnkiDoneDay(todayStr, anki.totalDue, { syncedToday: ankiSyncedToday });
   const todayAnkiRemainingMin = ankiDoneToday
     ? 0
     : (anki.totalDue > 0
@@ -292,7 +292,7 @@ Halte dich strikt an diese 7 Regeln und nutze jedes Feld aus dem JSON-Kontext ge
    - Wenn "triggersHomework: true": Nach dieser Übung fällt eine neue Hausaufgabe an. Bei "homeworkMode: understanding" gilt: reine Verständnis-Bearbeitung OHNE harte Abgabe-Panik (andere geben ab) – entspannt in den nächsten Tagen als eigenen Checklisten-Punkt einplanen.
 
 5. AUFGABEN-KATALOG & SELBST-KALIBRIERUNG (aufgabenKatalog):
-   - Wähle nach Möglichkeit direkt passende Bausteine aus "aufgabenKatalog" aus! Nutze deren "aktiveDauerMin" als realistische "estMin" (bereits am oberen Ende P75 kalibriert) und gib die exakte "catalogId" im Item zurück.
+   - Wähle nach Möglichkeit direkt passende Bausteine aus "aufgabenKatalog" aus! Nutze deren "aktiveDauerMin" als realistische "estMin" (bereits am oberen Ende P75 kalibriert) und gib die exakte "catalogId" im Item zurück. Weichen Katalog-Dauer und statischer Modul-Regel-Startwert ab, hat die aktive Katalog-Dauer ("aktiveDauerMin") Vorrang.
    - Du darfst bestehende Katalog-Bausteine NIEMALS löschen oder umbenennen.
    - Falls dir für eine wiederkehrende Aufgabenart ein passender Baustein im Katalog fehlt (z. B. Labor-Vorbereitung oder CAD-Aufgabe), kannst du ihn optional in "newCatalogItems" vorschlagen (die App fügt nur neue Einträge hinzu).
 
@@ -960,6 +960,7 @@ export function applyProposalToWeek(proposal, { onAfterMutate = null } = {}) {
   let appliedRhythm = false;
   if (proposal.suggestedRhythm) {
     store.state.ai.rhythmNotes = proposal.suggestedRhythm;
+    store.state.aiPrefsUpdatedAt = Date.now();
     appliedRhythm = true;
   }
   if (typeof onAfterMutate === 'function') onAfterMutate();

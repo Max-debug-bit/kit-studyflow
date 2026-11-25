@@ -497,6 +497,13 @@ export function getAutopilotSuggestions(nowDate = new Date()) {
   const handled = store.state.autopilotHandled || {};
   const suggestions = [];
 
+  const calCatalog = store.getCalibratedTaskCatalog();
+  const resolveCalibratedEst = (title, act, modId, fallbackMin) => {
+    const matched = store.matchCatalogItemForText(title, act, modId);
+    const cal = matched ? calCatalog.find((c) => c.id === matched.id) : null;
+    return (cal && cal.calibrated && cal.effectiveMin > 0) ? cal.effectiveMin : fallbackMin;
+  };
+
   // Look at today and the last 2 days for finished lectures/exercises that haven't been handled yet
   for (let offset = 0; offset >= -2; offset--) {
     const dStr = addDays(todayStr, offset);
@@ -511,36 +518,39 @@ export function getAutopilotSuggestions(nowDate = new Date()) {
       // Evaluate review/video suggestion independently from homework suggestion so accepting one never swallows the other!
       if (!handled[l.uid]) {
         if (l.mode === 'video' && l.videoStudyMinutes > 0) {
+          const title = `${baseLabel}: ${l.effectiveType === 'exercise' ? 'Übungs' : 'VL'}-Video vom ${wd}, ${fmtDateShort(dStr)} durcharbeiten`;
           suggestions.push({
             uid: l.uid,
             d: dStr,
             moduleId: l.moduleId || '',
             kind: 'l',
-            estMin: l.videoStudyMinutes,
+            estMin: resolveCalibratedEst(title, 'video', l.moduleId || '', l.videoStudyMinutes),
             reason: `Video-${l.effectiveType === 'exercise' ? 'Übung' : 'Vorlesung'} (${wd}, ${fmtDateShort(dStr)})`,
-            title: `${baseLabel}: ${l.effectiveType === 'exercise' ? 'Übungs' : 'VL'}-Video vom ${wd}, ${fmtDateShort(dStr)} durcharbeiten`
+            title
           });
         } else if (l.mode === 'live' && (l.liveReviewMinutes > 0 || l.createsAnki)) {
+          const title = `${baseLabel}: ${l.effectiveType === 'exercise' ? 'Übung' : 'VL'} vom ${wd}, ${fmtDateShort(dStr)} nacharbeiten${l.createsAnki ? ' + Ankis' : ''}`;
           suggestions.push({
             uid: l.uid,
             d: dStr,
             moduleId: l.moduleId || '',
             kind: 'l',
-            estMin: l.liveReviewMinutes || 75,
+            estMin: resolveCalibratedEst(title, 'review', l.moduleId || '', l.liveReviewMinutes || 75),
             reason: `${l.effectiveType === 'exercise' ? 'Übung' : 'Vorlesung'} (${wd}, ${fmtDateShort(dStr)})`,
-            title: `${baseLabel}: ${l.effectiveType === 'exercise' ? 'Übung' : 'VL'} vom ${wd}, ${fmtDateShort(dStr)} nacharbeiten${l.createsAnki ? ' + Ankis' : ''}`
+            title
           });
         }
       }
       if (l.triggersHomework && !handled[`${l.uid}_hw`]) {
+        const hwTitle = `${baseLabel}: Neue HA (${l.homeworkMode === 'understanding' ? 'Verständnis' : 'Abgabe'})`;
         suggestions.push({
           uid: `${l.uid}_hw`,
           d: dStr,
           moduleId: l.moduleId || '',
           kind: 'l',
-          estMin: 120,
+          estMin: resolveCalibratedEst(hwTitle, 'homework', l.moduleId || '', 120),
           reason: `Neue HA nach ${l.shortName}`,
-          title: `${baseLabel}: Neue HA (${l.homeworkMode === 'understanding' ? 'Verständnis' : 'Abgabe'})`
+          title: hwTitle
         });
       }
     }

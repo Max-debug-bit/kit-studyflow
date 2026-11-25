@@ -605,6 +605,7 @@ function cycleTheme() {
   const order = ['dark', 'light', 'auto'];
   const idx = order.indexOf(store.state.theme || 'dark');
   store.state.theme = order[(idx + 1) % order.length];
+  store.state.settingsUpdatedAt = Date.now();
   applyTheme(store.state.theme);
   store.save({ skipSync: true });
   const labels = { dark: 'Schwarz', light: 'Hell', auto: 'System' };

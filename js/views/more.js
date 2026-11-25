@@ -3,7 +3,6 @@
 import {
   store,
   LEVELS,
-  WEEKDAYS_MON,
   fmtMin,
   fmtHours,
   toDateStr,
@@ -27,20 +26,6 @@ export function renderMoreView(root, ctx) {
   const { toast, applyTheme, openModal, closeModal, handlePairingCodeFlow } = ctx;
   const st = store.getOverallStats();
   const anki = getAnkiLoadSummary();
-  const todayLearn = store.getDayBreakdown(toDateStr()).learnTotal;
-
-  const bestWdIdx = st.weekdayAvgs.indexOf(Math.max(...st.weekdayAvgs));
-  const bestWdLabel = st.weekdayAvgs[bestWdIdx] > 0 ? `${WEEKDAYS_MON[bestWdIdx]} (Ø ${fmtMin(st.weekdayAvgs[bestWdIdx])})` : 'Noch zu wenig Daten';
-  const weekDiff = st.thisWeek - st.lastWeek;
-  const movies = (st.totalLearn / 120).toFixed(1);
-  const football = (st.totalLearn / 90).toFixed(1);
-  const remainingFor1000Min = Math.max(0, 60000 - st.totalLearn);
-  const dailyPace = st.avg30 > 0 ? st.avg30 : st.avgActive;
-  const daysTo1000 = dailyPace > 0 ? Math.ceil(remainingFor1000Min / dailyPace) : null;
-  const eta1000 = daysTo1000 !== null
-    ? (daysTo1000 === 0 ? 'Erreicht' : `ca. ${daysTo1000} Tage (${(daysTo1000 / 365).toFixed(1)} Jahre)`)
-    : 'Noch keine Prognose';
-  const vsAvgDelta = Math.round(todayLearn - st.avgActive);
   const lastBackupText = store.state.lb
     ? new Date(store.state.lb).toLocaleString('de-DE')
     : 'Noch kein Backup';
@@ -48,7 +33,7 @@ export function renderMoreView(root, ctx) {
   root.innerHTML = `
     <div class="page-header">
       <div>
-        <h1 class="page-title">${activeSubtab === 'achievements' ? 'Erfolge & Erkenntnisse' : 'Einstellungen & Sync'}</h1>
+        <h1 class="page-title">${activeSubtab === 'achievements' ? 'Erfolge & Stufen' : 'Einstellungen & Sync'}</h1>
         <div class="small muted">Stufen, Abzeichen, GitHub-Sync, Gemini KI, AnkiConnect & Backup</div>
       </div>
       <div class="segmented">
@@ -93,21 +78,6 @@ export function renderMoreView(root, ctx) {
                 <div class="badge-desc">${esc(b.desc)}</div>
               </div>
             `).join('')}
-          </div>
-        </section>
-
-        <section class="card">
-          <div class="card-header">
-            <h2 class="card-title">${icon('activity', 15)} Erkenntnisse</h2>
-          </div>
-          <div class="grid-2">
-            <div class="kpi-box"><div class="kpi-label">Stärkster Wochentag</div><div class="kpi-val kit" style="font-size:0.96rem;">${bestWdLabel}</div></div>
-            <div class="kpi-box"><div class="kpi-label">Wochenvergleich</div><div class="kpi-val ${weekDiff >= 0 ? 'both' : 'danger'}" style="font-size:0.96rem;">${fmtMin(st.thisWeek)} (${weekDiff >= 0 ? '+' : ''}${fmtMin(weekDiff)})</div></div>
-            <div class="kpi-box"><div class="kpi-label">Hochrechnung Monat</div><div class="kpi-val learn" style="font-size:0.96rem;">${fmtHours(st.monthProjection)}</div></div>
-            <div class="kpi-box"><div class="kpi-label">Häufigste Eintragszeit</div><div class="kpi-val" style="font-size:0.96rem;">${st.peakHour >= 0 ? `${String(st.peakHour).padStart(2, '0')}:00–${String(st.peakHour).padStart(2, '0')}:59 Uhr` : '–'}</div></div>
-            <div class="kpi-box"><div class="kpi-label">Entspricht</div><div class="kpi-val" style="font-size:0.94rem;">${movies} Spielfilmen · ${football} Fußballspielen</div></div>
-            <div class="kpi-box"><div class="kpi-label">Prognose 1.000 Stunden</div><div class="kpi-val purple" style="font-size:0.94rem;">${eta1000}</div></div>
-            <div class="kpi-box"><div class="kpi-label">Heute vs. Durchschnitt</div><div class="kpi-val ${vsAvgDelta >= 0 ? 'both' : ''}" style="font-size:0.96rem;">${fmtMin(todayLearn)} (${vsAvgDelta >= 0 ? '+' : ''}${fmtMin(vsAvgDelta)} vs. Ø ${fmtMin(st.avgActive)})</div></div>
           </div>
         </section>
       </div>
@@ -201,7 +171,7 @@ export function renderMoreView(root, ctx) {
           <div class="card-header">
             <h2 class="card-title">${icon('cloud', 15)} GitHub Gist Cloud-Sync (Win 11 ↔ Pixel 9a)</h2>
             <div class="row" style="gap:6px;">
-              <span class="pill">App v20</span>
+              <span class="pill">App v21</span>
               <span class="pill ${store.secrets.lastSyncStatus === 'ok' ? 'kit' : store.secrets.lastSyncStatus === 'err' ? 'danger' : ''}">
                 ${store.secrets.lastSyncAt ? `Sync ${toTimeStr(new Date(store.secrets.lastSyncAt))}` : 'Lokal'}
               </span>
@@ -344,6 +314,8 @@ export function renderMoreView(root, ctx) {
       restDayMinMinutes: Math.max(0, Number(root.querySelector('#s-restmin').value) || 0)
     };
     store.state.anki.minDailyAnkiMin = Math.max(5, Number(root.querySelector('#s-minanki').value) || 30);
+    store.state.anki.updatedAt = Date.now();
+    store.state.settingsUpdatedAt = Date.now();
     applyTheme(store.state.theme);
     store.save();
     toast('Einstellungen gespeichert.', 'ok');
@@ -354,6 +326,7 @@ export function renderMoreView(root, ctx) {
     store.state.ai.model = root.querySelector('#s-gmodel').value;
     store.state.ai.studyNotes = root.querySelector('#s-notes').value.trim();
     store.state.ai.syncApiKeyInGist = root.querySelector('#s-sync-gkey').checked;
+    store.state.aiPrefsUpdatedAt = Date.now();
     store.save();
     toast('KI-Einstellungen gespeichert.', 'ok');
   });
@@ -367,6 +340,7 @@ export function renderMoreView(root, ctx) {
       const res = await testGeminiConnection(key, model);
       store.state.ai.apiKey = key;
       store.state.ai.model = model;
+      store.state.aiPrefsUpdatedAt = Date.now();
       store.save();
       toast(`Verbindung OK (${res.modelUsed}).`, 'ok');
     } catch (err) {

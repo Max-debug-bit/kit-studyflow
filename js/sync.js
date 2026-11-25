@@ -2,7 +2,7 @@
 // Merges entries, caffeine, checklist, backlog, reminders, customEvents, maps & tombstones
 // so simultaneous offline edits on Win 11 Firefox & Pixel 9a Chrome NEVER overwrite each other!
 
-import { store, toDateStr } from './store.js';
+import { store, toDateStr, filterLeafAnkiDecks } from './store.js';
 import { syncModulesFromIcs } from './ics.js';
 import { reconcileBacklogStatus, syncDayLecturesToProductive } from './checklist.js';
 
@@ -75,9 +75,8 @@ export function isGistConfigured() {
 
 function summarizeStateCounts(sRaw) {
   const s = sRaw || {};
-  const excluded = new Set(Array.isArray(s.anki?.excludedDecks) ? s.anki.excludedDecks : []);
-  const decks = (Array.isArray(s.anki?.decks) ? s.anki.decks : [])
-    .filter((d) => d && !excluded.has(d.fullName || d.name) && !excluded.has(d.name));
+  const excluded = Array.isArray(s.anki?.excludedDecks) ? s.anki.excludedDecks : [];
+  const decks = filterLeafAnkiDecks(Array.isArray(s.anki?.decks) ? s.anki.decks : [], excluded);
   const deckDue = decks.reduce((sum, d) => sum + (Number(d?.due) || 0), 0);
   const manualDue = (Number(s.anki?.manualNew) || 0) + (Number(s.anki?.manualLearn) || 0) + (Number(s.anki?.manualReview) || 0);
   return {
@@ -393,10 +392,31 @@ export function mergeStates(localRaw, remoteRaw) {
     .sort((a, b) => (a.ts || 0) - (b.ts || 0))
     .slice(-30);
 
+  // Dedicated timestamps for scalar settings & AI preferences (prevents phone todo ticks from clobbering laptop settings/rhythmNotes!)
+  const lSetTs = Number(local.settingsUpdatedAt) || 0;
+  const rSetTs = Number(remote.settingsUpdatedAt) || 0;
+  const settingsWinner = rSetTs > lSetTs ? remote : lSetTs > rSetTs ? local : primary;
+  const settingsUpdatedAt = Math.max(lSetTs, rSetTs);
+
+  const lAiTs = Number(local.aiPrefsUpdatedAt) || 0;
+  const rAiTs = Number(remote.aiPrefsUpdatedAt) || 0;
+  const aiWinner = rAiTs > lAiTs ? remote : lAiTs > rAiTs ? local : primary;
+  const aiLoser = aiWinner === remote ? local : remote;
+  const aiPrefsUpdatedAt = Math.max(lAiTs, rAiTs);
+
+  // Respect explicit API key deletion when syncApiKeyInGist is on, while preserving local key when remote stripped it
+  const syncKeyEnabled = Boolean(aiWinner.ai?.syncApiKeyInGist);
+  let resolvedApiKey;
+  if (syncKeyEnabled && (lAiTs !== rAiTs)) {
+    resolvedApiKey = aiWinner.ai?.apiKey || '';
+  } else {
+    resolvedApiKey = local.ai?.apiKey || remote.ai?.apiKey || '';
+  }
+
   const mergedAi = {
-    ...secondary.ai,
-    ...primary.ai,
-    apiKey: primary.ai?.apiKey || secondary.ai?.apiKey || '',
+    ...aiLoser.ai,
+    ...aiWinner.ai,
+    apiKey: resolvedApiKey,
     chatClearedAt,
     chat: mergedChat
   };
@@ -418,6 +438,15 @@ export function mergeStates(localRaw, remoteRaw) {
 
   const result = {
     ...primary,
+    goal: settingsWinner.goal,
+    mode: settingsWinner.mode,
+    sl: settingsWinner.sl,
+    cl: settingsWinner.cl,
+    theme: settingsWinner.theme,
+    autoLogLectures: settingsWinner.autoLogLectures,
+    planningPrefs: settingsWinner.planningPrefs,
+    settingsUpdatedAt,
+    aiPrefsUpdatedAt,
     schemaVersion: Math.max(local.schemaVersion || 2, remote.schemaVersion || 2, 2),
     e: mergedE,
     cf: mergeByIdAppend(primary.cf, secondary.cf),
@@ -624,16 +653,16 @@ export async function listGistArchives() {
   if (!res.ok) throw new Error(await readHttpErrorDetail(res));
   const gist = await res.json();
   const files = gist.files || {};
-  return Object.keys(files)
+  const archiveNames = Object.keys(files)
     .filter((fn) => fn.startsWith(ARCHIVE_PREFIX) && fn.endsWith('.json'))
     .sort()
-    .reverse()
-    .map((fn) => ({
-      filename: fn,
-      label: fn.replace(ARCHIVE_PREFIX, '').replace('.json', ''),
-      size: files[fn].size || 0,
-      content: files[fn].content || ''
-    }));
+    .reverse();
+  return Promise.all(archiveNames.map(async (fn) => ({
+    filename: fn,
+    label: fn.replace(ARCHIVE_PREFIX, '').replace('.json', ''),
+    size: files[fn].size || 0,
+    content: await readGistFileContent(files[fn])
+  })));
 }
 
 export function restoreArchiveSnapshot(jsonContent, label = 'Wochen-Archiv', { skipSync = true } = {}) {

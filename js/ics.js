@@ -190,7 +190,10 @@ export function parseIcsEvents(icsText) {
       continue;
     }
     if (line === 'END:VEVENT') {
-      if (cur && cur.dtstart) events.push(cur);
+      if (cur && cur.dtstart) {
+        cur.meta = classifyKitSummary(cur.summary);
+        events.push(cur);
+      }
       cur = null;
       continue;
     }
@@ -228,7 +231,7 @@ export function expandIcsEventsInRange(icsText, startDateStr, endDateStr) {
   const instances = [];
 
   for (const ev of rawEvents) {
-    const meta = classifyKitSummary(ev.summary);
+    const meta = ev.meta || classifyKitSummary(ev.summary);
     const exSet = new Set(ev.exdates || []);
     const startTime = ev.dtstart.timeStr;
     const endTime = ev.dtend ? ev.dtend.timeStr : startTime;

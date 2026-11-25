@@ -68,7 +68,7 @@ function fmtHMS(totalSec) {
 }
 
 export function renderTodayView(root, ctx) {
-  const { toast, navigate, promptLogFromChecklist } = ctx;
+  const { toast, navigate, openModal, closeModal, promptLogFromChecklist } = ctx;
   if (activeTimerTick) {
     clearTimeout(activeTimerTick);
     activeTimerTick = null;
@@ -87,23 +87,30 @@ export function renderTodayView(root, ctx) {
   if (syncDayAnkiFromRevlog(today, { save: false }).changed) autoSynced = true;
   if (autoSynced) store.save({ silent: true });
 
+  const ui = store.state.ui;
   const day = store.getDayBreakdown(today);
   const isRest = store.isRestDay(today);
   const goal = store.getGoalForDay(today);
   const pct = goal > 0 ? Math.round((day.learnTotal / goal) * 100) : 100;
   const streaks = store.getStreakStats(today);
   const live = store.getLiveRatio(today, now);
-  const caf = store.getCaffeineTodaySummary(now);
   const todayEntries = store.getEntriesForDate(today);
+  const todayCafItems = store.state.cf.filter((x) => x.d === today);
+  const caf = ui.d_caf
+    ? store.getCaffeineTodaySummary(now)
+    : {
+        todayMg: todayCafItems.reduce((s, x) => s + (Number(x.mg) || 0), 0),
+        currentMg: store.getCaffeineAtMs(now.getTime()),
+        todayItems: todayCafItems
+      };
   const anki = getAnkiLoadSummary();
-  const ankiRev = getAnkiReviewAnalytics(today);
-  const recentAnkiSyncs = ankiRev.syncHistory.slice(-20);
+  const ankiRev = ui.d_anki_card ? getAnkiReviewAnalytics(today) : null;
+  const recentAnkiSyncs = ankiRev ? ankiRev.syncHistory.slice(-20) : [];
   const calibratedCatalog = store.getCalibratedTaskCatalog();
   const minDailyAnki = Math.max(10, Number(store.state.anki.minDailyAnkiMin) || 30);
   const ankiSyncedToday = Boolean(anki.lastSyncAt && toDateStr(new Date(anki.lastSyncAt)) === today);
-  const ankiDoneToday = store.isAnkiDoneDay(today, anki.totalDue);
+  const ankiDoneToday = store.isAnkiDoneDay(today, anki.totalDue, { syncedToday: ankiSyncedToday });
   const timerStatus = store.getTimerStatus();
-  const ui = store.state.ui;
   if (timerStatus) ui.tdt = true;
 
   // Today's checklist & lectures (includes dynamic daily Anki check-off)
@@ -130,23 +137,32 @@ export function renderTodayView(root, ctx) {
     .join('');
 
   const wake14 = [];
+  let missingWakes = 0;
   for (let i = 0; i < 14; i++) {
     const d = addDays(today, -i);
-    wake14.push({ d, w: store.state.w[d] || '', sx: store.state.sx[d] || '' });
+    const w = store.state.w[d] || '';
+    if (!w) missingWakes++;
+    if (ui.d_wake) wake14.push({ d, w, sx: store.state.sx[d] || '' });
   }
-  const missingWakes = wake14.filter((x) => !x.w).length;
 
-  const recentEntries = [...store.state.e]
-    .sort((a, b) => (b.d + (b.t || '')).localeCompare(a.d + (a.t || '')) || compareIds(b.id, a.id))
-    .slice(0, 30);
+  const recentEntriesCount = Math.min(30, store.state.e.length);
+  const recentEntries = ui.d_ent
+    ? [...store.state.e]
+        .sort((a, b) => (b.d + (b.t || '')).localeCompare(a.d + (a.t || '')) || compareIds(b.id, a.id))
+        .slice(0, 30)
+    : [];
   const countingByDate = {};
-  for (const x of recentEntries) {
-    if (!countingByDate[x.d]) countingByDate[x.d] = store.getDayBreakdown(x.d).countingIds;
+  if (ui.d_ent) {
+    for (const x of recentEntries) {
+      if (!countingByDate[x.d]) countingByDate[x.d] = store.getDayBreakdown(x.d).countingIds;
+    }
   }
 
-  const recentCaf = [...store.state.cf]
-    .sort((a, b) => (b.d + (b.t || '')).localeCompare(a.d + (a.t || '')) || compareIds(b.id, a.id))
-    .slice(0, 20);
+  const recentCaf = ui.d_caf
+    ? [...store.state.cf]
+        .sort((a, b) => (b.d + (b.t || '')).localeCompare(a.d + (a.t || '')) || compareIds(b.id, a.id))
+        .slice(0, 20)
+    : [];
 
   const timerProj = timerStatus ? renderTimerProjectionSVG(live, timerStatus) : null;
 
@@ -251,9 +267,12 @@ export function renderTodayView(root, ctx) {
                 </div>
               </div>
               <div class="check-actions">
-                ${!it.done ? `<button class="btn btn-xs btn-ghost" data-chk-tomorrow="${esc(it.id)}" title="Auf morgen verschieben">${icon('arrowRight', 12)}</button>` : ''}
-                ${!it.done ? `<button class="btn btn-xs btn-ghost" data-chk-timer="${esc(it.id)}" data-kind="${esc(it.kind)}" data-dur="${est || 45}" title="Mit Timer starten (~${est || 45} min)">${icon('play', 12)}</button>` : ''}
-                <button class="btn btn-xs btn-ghost" data-chk-del="${esc(it.id)}" title="Entfernen">${icon('x', 13)}</button>
+                <span class="desktop-only" style="gap:4px;align-items:center;">
+                  ${!it.done ? `<button class="btn btn-xs btn-ghost" data-chk-tomorrow="${esc(it.id)}" title="Auf morgen verschieben">${icon('arrowRight', 12)}</button>` : ''}
+                  ${!it.done ? `<button class="btn btn-xs btn-ghost" data-chk-timer="${esc(it.id)}" data-kind="${esc(it.kind)}" data-dur="${est || 45}" title="Mit Timer starten (~${est || 45} min)">${icon('play', 12)}</button>` : ''}
+                  <button class="btn btn-xs btn-ghost" data-chk-del="${esc(it.id)}" title="Entfernen">${icon('x', 13)}</button>
+                </span>
+                <button type="button" class="btn btn-xs btn-ghost mobile-only" data-chk-menu="${esc(it.id)}" data-dur="${est || 45}" aria-label="Aktionen">•••</button>
               </div>
             </div>
           `;
@@ -376,6 +395,7 @@ export function renderTodayView(root, ctx) {
             <span class="chevron">${icon('chevron', 16)}</span>
           </button>
           <div class="collapsible-body">
+            ${ui.d_anki_card ? `
             <div class="row-between" style="margin-bottom:10px;">
               <div class="row xs mono" style="gap:10px;">
                 <span><span class="anki-dot blue"></span>Neu: ${anki.totalNew}</span>
@@ -389,7 +409,7 @@ export function renderTodayView(root, ctx) {
               </div>
             </div>
 
-            ${ankiRev.todayCards > 0 ? `
+            ${ankiRev && ankiRev.todayCards > 0 ? `
               <div style="margin-bottom:10px;padding:7px 10px;border-radius:var(--radius-xs);background:var(--bg-soft);border:1px solid var(--border);">
                 <div class="xs mono" style="color:var(--anki);font-weight:640;">
                   Heute in Anki geschafft: ${fmtMin(ankiRev.todayMin)} (${ankiRev.todayCards} Karten)
@@ -454,6 +474,7 @@ export function renderTodayView(root, ctx) {
               </div>
               <button class="btn btn-sm" id="btn-anki-manual-save">OK</button>
             </div>
+            ` : ''}
           </div>
         </section>
       </div>
@@ -553,6 +574,15 @@ export function renderTodayView(root, ctx) {
         </button>
         <div class="collapsible-body">
           <form id="entry-form">
+            ${store.state.mode !== 'sum' ? `
+              <div class="row-between" style="margin-bottom:10px;gap:8px;flex-wrap:wrap;">
+                <div class="segmented" role="group" aria-label="Eingabe-Modus">
+                  <button type="button" class="active" data-en-mode="add">+ Dauer dieser Session</button>
+                  <button type="button" data-en-mode="total">Focus-Friend Stand</button>
+                </div>
+                <span class="xs muted" id="en-mode-hint">Wird auf bisherigen Tageswert addiert.</span>
+              </div>
+            ` : ''}
             <div class="field-grid">
               <div class="field">
                 <label>Datum</label>
@@ -571,8 +601,8 @@ export function renderTodayView(root, ctx) {
                 </select>
               </div>
               <div class="field">
-                <label>Minuten</label>
-                <input type="number" id="en-min" class="input mono" min="1" max="1440" placeholder="z. B. 90" required />
+                <label id="en-min-label">${store.state.mode !== 'sum' ? 'Dauer (Minuten)' : 'Minuten'}</label>
+                <input type="number" id="en-min" class="input mono" min="1" max="1440" placeholder="${store.state.mode !== 'sum' ? 'z. B. 45' : 'z. B. 90'}" required />
               </div>
               <div class="field">
                 <label>Fach (optional)</label>
@@ -614,6 +644,7 @@ export function renderTodayView(root, ctx) {
             <span class="chevron">${icon('chevron', 16)}</span>
           </button>
           <div class="collapsible-body">
+            ${ui.d_caf ? `
             <div class="grid-3" style="margin-bottom:10px;">
               <div class="kpi-box"><div class="kpi-label">Aktiv</div><div class="kpi-val caf">${Math.round(caf.currentMg)} mg</div></div>
               <div class="kpi-box"><div class="kpi-label">Schlafzeit</div><div class="kpi-val">${Math.round(caf.sleepMg)} mg</div></div>
@@ -643,6 +674,7 @@ export function renderTodayView(root, ctx) {
                 `).join('') || '<div class="xs muted">Keine Einträge.</div>'}
               </div>
             </details>
+            ` : ''}
           </div>
         </section>
 
@@ -652,6 +684,7 @@ export function renderTodayView(root, ctx) {
             <span class="chevron">${icon('chevron', 16)}</span>
           </button>
           <div class="collapsible-body">
+            ${ui.d_wake ? `
             <form id="wake-form" class="field-grid" style="margin-bottom:12px;">
               <div class="field"><label>Datum</label><input type="date" id="wk-date" class="input mono" value="${today}" max="${today}" required /></div>
               <div class="field"><label>Aufwachen</label><input type="time" id="wk-wake" class="input mono" value="${store.state.w[today] || '08:30'}" /></div>
@@ -673,6 +706,7 @@ export function renderTodayView(root, ctx) {
                 `).join('')}
               </div>
             </details>
+            ` : ''}
           </div>
         </section>
       </div>
@@ -680,10 +714,11 @@ export function renderTodayView(root, ctx) {
       <!-- 6. Letzte Einträge -->
       <section class="card ${ui.d_ent ? '' : 'collapsed'}" data-collapse="d_ent">
         <button class="collapsible-header" data-toggle="d_ent">
-          <h2 class="card-title">${icon('activity', 15)} Letzte Einträge (${recentEntries.length})</h2>
+          <h2 class="card-title">${icon('activity', 15)} Letzte Einträge (${recentEntriesCount})</h2>
           <span class="chevron">${icon('chevron', 16)}</span>
         </button>
         <div class="collapsible-body">
+          ${ui.d_ent ? `
           <div class="entry-list">
             ${recentEntries.map((x) => {
               const counts = countingByDate[x.d]?.has(x.id);
@@ -710,6 +745,7 @@ export function renderTodayView(root, ctx) {
               `;
             }).join('') || '<div class="small muted">Noch keine Einträge vorhanden.</div>'}
           </div>
+          ` : ''}
         </div>
       </section>
 
@@ -781,6 +817,7 @@ export function renderTodayView(root, ctx) {
   root.querySelectorAll('[data-ci-em]').forEach((btn) => {
     btn.addEventListener('click', () => {
       store.state.ai.energyMode = btn.getAttribute('data-ci-em');
+      store.state.aiPrefsUpdatedAt = Date.now();
       root.querySelectorAll('[data-ci-em]').forEach((b) => b.classList.toggle('active', b === btn));
     });
   });
@@ -829,24 +866,69 @@ export function renderTodayView(root, ctx) {
     });
   });
 
+  const startTimerForChecklistItem = (chkId, fallbackKind = 'l', durMin = 45) => {
+    const it = store.state.checklist.find((x) => x.id === chkId);
+    const meta = it ? inferMetaFromChecklistItem(it) : { kind: fallbackKind || 'l', mod: '', act: '' };
+    const catId = it?.catalogId || (meta.kind !== 'a' ? (store.matchCatalogItemForText(it?.title || '', meta.act, meta.mod)?.id || '') : '');
+    store.startTimer({
+      mode: 'countdown',
+      kind: fallbackKind || meta.kind || 'l',
+      durationMin: Number(durMin) || 45,
+      planBlockId: chkId,
+      mod: meta.mod || '',
+      note: it?.title || '',
+      act: meta.act || '',
+      catalogId: catId
+    });
+    toast('Timer gestartet.', 'ok');
+    setTimeout(() => document.getElementById('timer-card')?.scrollIntoView({ behavior: 'smooth' }), 60);
+  };
+
   root.querySelectorAll('[data-chk-timer]').forEach((btn) => {
     btn.addEventListener('click', () => {
-      const chkId = btn.getAttribute('data-chk-timer');
-      const it = store.state.checklist.find((x) => x.id === chkId);
-      const meta = it ? inferMetaFromChecklistItem(it) : { kind: btn.getAttribute('data-kind') || 'l', mod: '', act: '' };
-      const catId = it?.catalogId || (meta.kind !== 'a' ? (store.matchCatalogItemForText(it?.title || '', meta.act, meta.mod)?.id || '') : '');
-      store.startTimer({
-        mode: 'countdown',
-        kind: btn.getAttribute('data-kind') || meta.kind || 'l',
-        durationMin: Number(btn.getAttribute('data-dur')) || 45,
-        planBlockId: chkId,
-        mod: meta.mod || '',
-        note: it?.title || '',
-        act: meta.act || '',
-        catalogId: catId
+      startTimerForChecklistItem(
+        btn.getAttribute('data-chk-timer'),
+        btn.getAttribute('data-kind'),
+        btn.getAttribute('data-dur')
+      );
+    });
+  });
+
+  // Mobile safe action menu (•••) so thumb taps never accidentally hit Delete (×)
+  root.querySelectorAll('[data-chk-menu]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const id = btn.getAttribute('data-chk-menu');
+      const dur = Number(btn.getAttribute('data-dur')) || 45;
+      const it = store.state.checklist.find((x) => x.id === id);
+      if (!it || !openModal) return;
+      openModal(`
+        <div class="card-header">
+          <h3 class="card-title">Aufgaben-Aktionen</h3>
+          <button class="icon-btn" id="tm-close">${icon('x', 15)}</button>
+        </div>
+        <div class="small" style="font-weight:600;margin-bottom:12px;">${esc(it.title)}</div>
+        <div class="stack" style="gap:8px;">
+          ${!it.done ? `<button type="button" class="btn btn-primary" id="tm-timer">${icon('play', 14)} Fokus-Timer starten (~${dur} min)</button>` : ''}
+          ${!it.done ? `<button type="button" class="btn" id="tm-tomorrow">${icon('arrowRight', 14)} Auf morgen (${fmtDateShort(tomorrow)}) verschieben</button>` : ''}
+          <button type="button" class="btn btn-danger" id="tm-del">${icon('x', 14)} Aufgabe löschen</button>
+        </div>
+      `, (modalEl) => {
+        modalEl.querySelector('#tm-close')?.addEventListener('click', closeModal);
+        modalEl.querySelector('#tm-timer')?.addEventListener('click', () => {
+          closeModal();
+          startTimerForChecklistItem(id, it.kind, dur);
+        });
+        modalEl.querySelector('#tm-tomorrow')?.addEventListener('click', () => {
+          closeModal();
+          const res = moveChecklistItemToDate(id, tomorrow);
+          if (res.ok) toast(`Auf morgen (${fmtDateShort(tomorrow)}) verschoben.`, 'ok');
+        });
+        modalEl.querySelector('#tm-del')?.addEventListener('click', () => {
+          closeModal();
+          deleteChecklistItem(id);
+          toast('Punkt gelöscht.', '', { undo: true });
+        });
       });
-      toast('Timer gestartet.', 'ok');
-      setTimeout(() => document.getElementById('timer-card')?.scrollIntoView({ behavior: 'smooth' }), 60);
     });
   });
 
@@ -885,13 +967,19 @@ export function renderTodayView(root, ctx) {
     });
   });
 
-  // Collapsibles
+  // Collapsibles (lazy cards render on expand so collapsed cards stay zero-cost!)
+  const lazyCollapseKeys = new Set(['d_anki_card', 'd_caf', 'd_wake', 'd_ent']);
   root.querySelectorAll('[data-toggle]').forEach((btn) => {
     btn.addEventListener('click', () => {
       const key = btn.getAttribute('data-toggle');
-      store.state.ui[key] = !store.state.ui[key];
+      const nextOpen = !store.state.ui[key];
+      store.state.ui[key] = nextOpen;
       store.save({ skipSync: true, silent: true });
-      btn.closest('.card')?.classList.toggle('collapsed', !store.state.ui[key]);
+      if (nextOpen && lazyCollapseKeys.has(key)) {
+        renderTodayView(root, ctx);
+      } else {
+        btn.closest('.card')?.classList.toggle('collapsed', !nextOpen);
+      }
     });
   });
 
@@ -931,8 +1019,10 @@ export function renderTodayView(root, ctx) {
     toast('Sync am Laptop mit geöffnetem Anki — am Handy wird der Stand per Cloud-Sync übernommen (oder unter Anki-Details manuell eintragen).');
   });
   root.querySelector('#btn-anki-open-details')?.addEventListener('click', () => {
+    const wasClosed = !store.state.ui.d_anki_card;
     store.state.ui.d_anki_card = true;
     store.save({ skipSync: true, silent: true });
+    if (wasClosed) renderTodayView(root, ctx);
     const card = root.querySelector('#anki-detail-card');
     if (card) {
       card.classList.remove('collapsed');
@@ -942,18 +1032,24 @@ export function renderTodayView(root, ctx) {
   root.querySelector('#anki-row-toggle')?.addEventListener('click', () => {
     const nextDone = !ankiDoneToday;
     store.setAnkiDoneDay(today, nextDone);
-    if (nextDone && promptLogFromChecklist) {
-      promptLogFromChecklist({
-        id: 'anki_daily',
-        title: 'Anki für heute abhaken',
-        kind: 'a',
-        estMin: 0,
-        done: true,
-        isAnkiDaily: true,
-        remainingCards: anki.totalDue,
-        alreadyLoggedMin: day.a
-      });
-    } else if (!nextDone) {
+    if (nextDone) {
+      if (day.a > 0) {
+        toast(`Anki für heute erledigt (${fmtMin(day.a)} übernommen).`, 'ok');
+      } else if (ankiSyncedToday && anki.totalDue === 0) {
+        toast('Anki für heute erledigt (0 fällige Karten).', 'ok');
+      } else if (promptLogFromChecklist) {
+        promptLogFromChecklist({
+          id: 'anki_daily',
+          title: 'Anki für heute abhaken',
+          kind: 'a',
+          estMin: 0,
+          done: true,
+          isAnkiDaily: true,
+          remainingCards: anki.totalDue,
+          alreadyLoggedMin: day.a
+        });
+      }
+    } else {
       toast('Anki für heute wieder geöffnet.');
     }
   });
@@ -1015,15 +1111,52 @@ export function renderTodayView(root, ctx) {
   enKindEl?.addEventListener('change', syncEntryActLock);
   syncEntryActLock();
 
+  let entryLogMode = 'add';
+  const enDateEl = root.querySelector('#en-date');
+  const enMinLabel = root.querySelector('#en-min-label');
+  const enMinInput = root.querySelector('#en-min');
+  const enModeHint = root.querySelector('#en-mode-hint');
+  const updateEntryModeUi = () => {
+    if (store.state.mode === 'sum') return;
+    const dVal = enDateEl?.value || today;
+    const kVal = enKindEl?.value || 'l';
+    const curVal = store.getDayBreakdown(dVal)[kVal] || 0;
+    if (entryLogMode === 'add') {
+      if (enMinLabel) enMinLabel.textContent = 'Dauer (Minuten)';
+      if (enMinInput) enMinInput.placeholder = 'z. B. 45';
+      if (enModeHint) enModeHint.textContent = curVal > 0 ? `Wird auf ${fmtMin(curVal)} addiert.` : 'Wird als Session-Dauer addiert.';
+    } else {
+      if (enMinLabel) enMinLabel.textContent = 'Tages-Gesamtstand (min)';
+      if (enMinInput) enMinInput.placeholder = curVal > 0 ? `z. B. ${curVal + 45}` : 'z. B. 135';
+      if (enModeHint) enModeHint.textContent = curVal > 0 ? `Aktueller Stand: ${fmtMin(curVal)} (${store.getModeLabel()}).` : `Direkter Tagesstand (${store.getModeLabel()}).`;
+    }
+  };
+  root.querySelectorAll('[data-en-mode]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      entryLogMode = btn.getAttribute('data-en-mode') || 'add';
+      root.querySelectorAll('[data-en-mode]').forEach((b) => b.classList.toggle('active', b === btn));
+      updateEntryModeUi();
+    });
+  });
+  enDateEl?.addEventListener('change', updateEntryModeUi);
+  enKindEl?.addEventListener('change', updateEntryModeUi);
+  updateEntryModeUi();
+
   root.querySelector('#entry-form')?.addEventListener('submit', (e) => {
     e.preventDefault();
+    const dVal = root.querySelector('#en-date').value;
     const kind = root.querySelector('#en-kind').value;
     const act = kind === 'a' ? 'anki' : kind === 'p' ? '' : root.querySelector('#en-act').value;
+    const rawMin = Math.round(Number(root.querySelector('#en-min').value) || 0);
+    const useAdd = store.state.mode !== 'sum' && entryLogMode === 'add';
+    const before = useAdd ? store.getDayBreakdown(dVal)[kind] : 0;
+    const finalM = useAdd ? before + rawMin : rawMin;
     const res = store.addEntry({
-      d: root.querySelector('#en-date').value,
+      d: dVal,
       t: root.querySelector('#en-time').value,
       k: kind,
-      m: root.querySelector('#en-min').value,
+      m: finalM,
+      sessionMin: useAdd ? rawMin : 0,
       mod: root.querySelector('#en-mod').value,
       act,
       note: root.querySelector('#en-note').value

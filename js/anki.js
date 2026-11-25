@@ -11,18 +11,35 @@ import {
 
 const MAX_SYNC_HISTORY = 180;
 const REVLOG_LOOKBACK_DAYS = 180;
+const ANKI_DAY_ROLLOVER_HOURS = 4; // Matches Anki Desktop default (04:00 AM study-day cutoff)
 
-async function ankiInvoke(action, params = {}, url = null) {
+function ankiStudyDateStr(ms) {
+  return toDateStr(new Date(ms - ANKI_DAY_ROLLOVER_HOURS * 3600 * 1000));
+}
+
+async function ankiInvoke(action, params = {}, url = null, timeoutMs = 8000) {
   const endpoint = (url || store.state.anki.url || 'http://127.0.0.1:8765').trim();
-  const res = await fetch(endpoint, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action, version: 6, params })
-  });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const data = await res.json();
-  if (data.error) throw new Error(data.error);
-  return data.result;
+  const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timer = ctrl ? setTimeout(() => ctrl.abort(), timeoutMs) : null;
+  try {
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action, version: 6, params }),
+      signal: ctrl?.signal
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    return data.result;
+  } catch (err) {
+    if (err?.name === 'AbortError') {
+      throw new Error('AnkiConnect-Timeout (8 s) — ist ein Dialog in Anki offen?');
+    }
+    throw err;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 export function getAnkiWeights() {
@@ -94,6 +111,14 @@ export function syncDayAnkiFromRevlog(dStr = toDateStr(), { save = false } = {})
   // In 'sum' mode, avoid adding an autoAnki entry on top of an existing manual Anki entry on the same day
   if (store.state.mode === 'sum' && existingIdx < 0 && store.state.e.some((x) => x.d === dStr && x.k === 'a' && !x.autoAnki)) {
     return { changed: false, minutes: totalMin, cards: totalCards };
+  }
+
+  // In 'last' mode, never let an autoAnki sync undercut a higher manual Anki entry logged on the same day
+  if (store.state.mode === 'last' && totalMin > 0) {
+    const higherManual = store.state.e.some(
+      (x) => x.d === dStr && x.k === 'a' && !x.autoAnki && (Number(x.m) || 0) > totalMin
+    );
+    if (higherManual) return { changed: false, minutes: totalMin, cards: totalCards };
   }
 
   let changed = false;
@@ -208,8 +233,8 @@ export async function syncAnkiConnect() {
   if (leafFullNames.length) {
     try {
       const startID = nowTs - REVLOG_LOOKBACK_DAYS * 86400 * 1000;
-      const cutoffDateStr = toDateStr(new Date(startID));
-      const minKeepDateStr = toDateStr(new Date(nowTs - 365 * 86400 * 1000));
+      const cutoffDateStr = ankiStudyDateStr(startID);
+      const minKeepDateStr = ankiStudyDateStr(nowTs - 365 * 86400 * 1000);
       const paceCutoffMs = nowTs - 30 * 86400 * 1000;
 
       const actions = leafFullNames.map((deck) => ({
@@ -247,7 +272,7 @@ export async function syncAnkiConnect() {
             const revMs = Number(row[0]) || 0;
             if (revMs <= 0) continue;
             const durSec = Math.max(0, Math.min(180, (Number(row[7]) || 0) / 1000));
-            const dStr = toDateStr(new Date(revMs));
+            const dStr = ankiStudyDateStr(revMs);
             if (!dayAcc[dStr]) dayAcc[dStr] = { sec: 0, cards: 0 };
             dayAcc[dStr].sec += durSec;
             dayAcc[dStr].cards += 1;
@@ -299,7 +324,12 @@ export async function syncAnkiConnect() {
 
   const summary = getAnkiLoadSummary();
   recordAnkiSyncPoint(summary, nowTs);
-  const autoLogged = syncDayAnkiFromRevlog(toDateStr(new Date(nowTs)), { save: false });
+  const studyDayStr = ankiStudyDateStr(nowTs);
+  const calDayStr = toDateStr(new Date(nowTs));
+  const autoLogged = syncDayAnkiFromRevlog(studyDayStr, { save: false });
+  if (calDayStr !== studyDayStr) {
+    syncDayAnkiFromRevlog(calDayStr, { save: false });
+  }
   store.save();
 
   return {

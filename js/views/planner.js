@@ -266,6 +266,7 @@ export function renderPlannerView(root, { toast, navigate }) {
   root.querySelectorAll('[data-energy]').forEach((btn) => {
     btn.addEventListener('click', () => {
       store.state.ai.energyMode = btn.getAttribute('data-energy');
+      store.state.aiPrefsUpdatedAt = Date.now();
       store.save();
     });
   });
@@ -324,6 +325,7 @@ export function renderPlannerView(root, { toast, navigate }) {
 
   root.querySelector('#btn-save-rhythm')?.addEventListener('click', () => {
     store.state.ai.rhythmNotes = root.querySelector('#rhythm-notes-inp')?.value.trim() || '';
+    store.state.aiPrefsUpdatedAt = Date.now();
     store.save();
     toast('Rhythmus-Orientierung gespeichert.', 'ok');
   });
@@ -335,6 +337,7 @@ export function renderPlannerView(root, { toast, navigate }) {
       if (msg?.suggestedRhythm) {
         store.pushUndo('Rhythmus-Orientierung aktualisiert');
         store.state.ai.rhythmNotes = msg.suggestedRhythm;
+        store.state.aiPrefsUpdatedAt = Date.now();
         msg.rhythmApplied = true;
         store.save();
         toast('Rhythmus-Orientierung übernommen.', 'ok', { undo: true });

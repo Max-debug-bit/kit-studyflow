@@ -1,5 +1,11 @@
 name: Sync KIT WebCal to Private Gist
 
+permissions: {}
+
+concurrency:
+  group: sync-webcal
+  cancel-in-progress: true
+
 on:
   schedule:
     - cron: '0 */6 * * *' # Alle 6 Stunden automatisch aktualisieren
@@ -34,11 +40,38 @@ jobs:
           with urllib.request.urlopen(req, timeout=30) as resp:
               ics_text = resp.read().decode("utf-8", errors="replace")
 
-          if "BEGIN:VCALENDAR" not in ics_text:
-              print("Antwort sieht nicht nach gültiger .ics-Datei aus!")
+          if "BEGIN:VCALENDAR" not in ics_text or "END:VCALENDAR" not in ics_text:
+              print("Antwort ist keine vollständige .ics-Datei (BEGIN/END:VCALENDAR fehlt)!")
               sys.exit(1)
 
-          print(f"Kalender geladen ({len(ics_text)} Zeichen). Aktualisiere privaten Gist...")
+          gh_headers = {
+              "Authorization": f"Bearer {token}",
+              "Accept": "application/vnd.github+json",
+              "User-Agent": "KIT-StudyFlow-Sync/1.0"
+          }
+
+          # Vorab prüfen, ob sich der Kalender gegenüber dem Gist überhaupt geändert hat (vermeidet unnötige Gist-Commits)
+          existing_ics = ""
+          try:
+              get_req = urllib.request.Request(f"https://api.github.com/gists/{gist_id}", headers=gh_headers)
+              with urllib.request.urlopen(get_req, timeout=30) as resp:
+                  gist_data = json.loads(resp.read().decode("utf-8"))
+              f_obj = (gist_data.get("files") or {}).get("kit-calendar.ics")
+              if f_obj:
+                  if f_obj.get("truncated") and f_obj.get("raw_url"):
+                      raw_req = urllib.request.Request(f_obj["raw_url"], headers={"User-Agent": "KIT-StudyFlow-Sync/1.0"})
+                      with urllib.request.urlopen(raw_req, timeout=30) as raw_resp:
+                          existing_ics = raw_resp.read().decode("utf-8", errors="replace")
+                  else:
+                      existing_ics = f_obj.get("content") or ""
+          except Exception as exc:
+              print(f"Warnung: Vorab-Vergleich fehlgeschlagen ({exc}), fahre mit Update fort.")
+
+          if existing_ics == ics_text:
+              print(f"Kalender unverändert ({len(ics_text)} Zeichen) — kein Gist-Update nötig.")
+              sys.exit(0)
+
+          print(f"Kalender geändert ({len(ics_text)} Zeichen). Aktualisiere privaten Gist...")
           payload = json.dumps({
               "files": {
                   "kit-calendar.ics": {
@@ -51,12 +84,7 @@ jobs:
               f"https://api.github.com/gists/{gist_id}",
               data=payload,
               method="PATCH",
-              headers={
-                  "Authorization": f"Bearer {token}",
-                  "Accept": "application/vnd.github+json",
-                  "Content-Type": "application/json",
-                  "User-Agent": "KIT-StudyFlow-Sync/1.0"
-              }
+              headers={**gh_headers, "Content-Type": "application/json"}
           )
           with urllib.request.urlopen(patch_req, timeout=30) as resp:
               print("Erfolgreich synchronisiert! HTTP", resp.status)

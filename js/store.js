@@ -29,7 +29,7 @@ export const DEFAULT_TASK_CATALOG = [
   { id: 'cat_mkl_vl', subject: 'MKL A', title: 'MKL: VL nacharbeiten + Ankis erstellen', act: 'review', kind: 'l', defaultMin: 75, notes: 'Nur nach Live-VL', source: 'default' },
   { id: 'cat_mkl_praxis', subject: 'MKL A', title: 'MKL: Zeichnen / Skizzieren / Workshop-Vorbereitung', act: 'homework', kind: 'l', defaultMin: 90, notes: 'Praxis / Konstruktion', source: 'default' },
   { id: 'cat_wk_vl', subject: 'WK I', title: 'WK: VL nacharbeiten + Ankis erstellen', act: 'review', kind: 'l', defaultMin: 75, notes: 'Folien + Karten', source: 'default' },
-  { id: 'cat_ft_vl', subject: 'FT', title: 'FT: VL nacharbeiten + Ankis erstellen', act: 'review', kind: 'l', defaultMin: 60, notes: 'Folien + Karten', source: 'default' },
+  { id: 'cat_ft_vl', subject: 'FT', title: 'FT: VL nacharbeiten + Ankis erstellen', act: 'review', kind: 'l', defaultMin: 75, notes: 'Folien + Karten', source: 'default' },
   { id: 'cat_anki_create', subject: 'Anki', title: 'Ankis nachholen / erstellen (eine Runde)', act: 'review', kind: 'l', defaultMin: 45, notes: 'Karten schreiben (Reviews laufen dynamisch)', source: 'default' },
   { id: 'cat_exam', subject: 'Klausur', title: 'Altklausur / Übungsblock rechnen', act: 'exam', kind: 'l', defaultMin: 90, notes: 'Aktives Üben', source: 'default' },
   { id: 'cat_summary', subject: 'Klausur', title: 'Zusammenfassung / Formelsammlung schreiben', act: 'review', kind: 'l', defaultMin: 60, notes: 'Überblick bauen', source: 'default' },
@@ -184,6 +184,8 @@ export function createDefaultState() {
     cl: 400,        // caffeine daily limit mg
     tm: null,       // active timer object or null
     tmUpdatedAt: 0, // dedicated timestamp for multi-device timer sync
+    settingsUpdatedAt: 0, // dedicated timestamp for scalar settings & planningPrefs
+    aiPrefsUpdatedAt: 0,  // dedicated timestamp for model, energyMode, studyNotes, rhythmNotes
     ui: {
       d_hero: true,
       d_live: true,
@@ -717,8 +719,8 @@ class Store {
     if (!id) return;
     if (!this.state.deletedIds) this.state.deletedIds = {};
     this.state.deletedIds[String(id)] = Date.now();
-    // Prune tombstones older than 45 days
-    const cutoff = Date.now() - 45 * 24 * 3600 * 1000;
+    // Prune tombstones older than 180 days (full semester retention)
+    const cutoff = Date.now() - 180 * 24 * 3600 * 1000;
     for (const k of Object.keys(this.state.deletedIds)) {
       if (this.state.deletedIds[k] < cutoff) delete this.state.deletedIds[k];
     }
@@ -741,7 +743,7 @@ class Store {
     let realBlockMin = Math.round(Number(sessionMin) || 0);
     if (realBlockMin <= 0) {
       if (this.state.mode === 'sum') realBlockMin = minutes;
-      else realBlockMin = minutes > before[k || 'l'] ? minutes - before[k || 'l'] : minutes;
+      else realBlockMin = minutes > before[k || 'l'] ? minutes - before[k || 'l'] : 0;
     }
 
     const resolvedCatalogId = catalogId || (k !== 'p' ? (this.matchCatalogItemForText(note, act, mod)?.id || '') : '');
@@ -1091,10 +1093,10 @@ class Store {
     return next;
   }
 
-  isAnkiDoneDay(dStr = toDateStr(), totalDue = null) {
+  isAnkiDoneDay(dStr = toDateStr(), totalDue = null, { syncedToday = false } = {}) {
     const explicit = this.state.ankiDoneDays?.[dStr];
     if (explicit !== undefined) return Boolean(explicit);
-    if (totalDue === 0 && this.getDayBreakdown(dStr).a > 0) return true;
+    if (totalDue === 0 && (this.getDayBreakdown(dStr).a > 0 || syncedToday)) return true;
     return false;
   }
 
@@ -1351,7 +1353,7 @@ class Store {
       { id: 'first', ico: 'check', name: 'Erster Eintrag', desc: 'Den Grundstein gelegt', unlocked: this.state.e.length >= 1 },
       { id: 'goal1', ico: 'target', name: 'Tagesziel erreicht', desc: 'Mind. 1x Tagesziel geschafft', unlocked: streaks.goalDayCount >= 1 },
       { id: 's3', ico: 'flame', name: '3 Tage in Folge', desc: '3er-Serie erreicht', unlocked: streaks.longest >= 3 },
-      { id: 's7', ico: 'flame', name: '7 Tage in Folge', desc: 'Eine ganze Woche am Stück', unlocked: streaks.longest >= 7 },
+      { id: 's7', ico: 'flame', name: '7er-Serie', desc: '7 Zieltage im Takt (Ruhetage schützen)', unlocked: streaks.longest >= 7 },
       { id: '3h', ico: 'clock', name: '3-Stunden-Tag', desc: '180 min Lernen an einem Tag', unlocked: recordDay.min >= 180 },
       { id: '10h', ico: 'award', name: '10 Stunden gesamt', desc: 'Die ersten 10 h sind im Kasten', unlocked: totalHours >= 10 },
       { id: '50h', ico: 'award', name: '50 Stunden gesamt', desc: '50 Stunden Fokus-Lernzeit', unlocked: totalHours >= 50 },
@@ -1695,11 +1697,11 @@ class Store {
     let label = 'Entspannt';
     let hint = 'Gute Balance – genug Luft für reguläres Pensum.';
 
-    if (total7Hours >= 36 || consecutiveHeavyDays >= 10) {
+    if (total7Hours >= 34 || consecutiveHeavyDays >= 7) {
       level = 'hoch';
       label = 'Hohe Last';
       hint = `${total7Hours.toFixed(1)} h in 7 Tagen${consecutiveHeavyDays >= 7 ? `, ${consecutiveHeavyDays} Tage ohne Pause` : ''} – Reset-Tag lohnt sich.`;
-    } else if (total7Hours >= 22 || consecutiveHeavyDays >= 6) {
+    } else if (total7Hours >= 22 || consecutiveHeavyDays >= 5) {
       level = 'solide';
       label = 'Solide Last';
       hint = `${total7Hours.toFixed(1)} h in 7 Tagen – stabiler KIT-Rhythmus.`;
@@ -2182,14 +2184,39 @@ class Store {
       // Merge mode (all v16 collections & timestamped maps)
       const nowTs = Date.now();
       const existingE = new Set(this.state.e.map((x) => `${x.id}|${x.d}|${x.t}|${x.m}|${x.k}`));
+      // Merge tombstones (keep newest timestamp per id) so intentionally deleted items stay deleted
+      if (!this.state.deletedIds) this.state.deletedIds = {};
+      if (parsed.deletedIds && typeof parsed.deletedIds === 'object') {
+        for (const [dk, ts] of Object.entries(parsed.deletedIds)) {
+          this.state.deletedIds[dk] = Math.max(this.state.deletedIds[dk] || 0, Number(ts) || 0);
+        }
+      }
+      const isTombstoned = (id, itemTs = 0) => {
+        if (id === undefined || id === null) return false;
+        const delTs = this.state.deletedIds[String(id)];
+        return Boolean(delTs && delTs >= (Number(itemTs) || 0));
+      };
+
+      const existingEIds = new Set(this.state.e.map((x) => String(x.id)));
       for (const item of (parsed.e || [])) {
+        if (!item || item.id === undefined) continue;
+        if (isTombstoned(item.id, item.updatedAt || 0)) continue;
         const sig = `${item.id}|${item.d}|${item.t}|${item.m}|${item.k}`;
-        if (!existingE.has(sig)) this.state.e.push({ ...item, updatedAt: item.updatedAt || nowTs });
+        if (!existingE.has(sig) && !existingEIds.has(String(item.id))) {
+          this.state.e.push({ ...item, updatedAt: item.updatedAt || nowTs });
+          existingEIds.add(String(item.id));
+        }
       }
       const existingCf = new Set(this.state.cf.map((x) => `${x.id}|${x.d}|${x.t}|${x.mg}`));
+      const existingCfIds = new Set(this.state.cf.map((x) => String(x.id)));
       for (const item of (parsed.cf || [])) {
+        if (!item || item.id === undefined) continue;
+        if (isTombstoned(item.id, item.updatedAt || 0)) continue;
         const sig = `${item.id}|${item.d}|${item.t}|${item.mg}`;
-        if (!existingCf.has(sig)) this.state.cf.push({ ...item, updatedAt: item.updatedAt || nowTs });
+        if (!existingCf.has(sig) && !existingCfIds.has(String(item.id))) {
+          this.state.cf.push({ ...item, updatedAt: item.updatedAt || nowTs });
+          existingCfIds.add(String(item.id));
+        }
       }
 
       const mergeMapWithMeta = (mapName, incoming) => {
@@ -2222,20 +2249,57 @@ class Store {
         this.state.planningPrefs = { ...(this.state.planningPrefs || {}), ...parsed.planningPrefs };
       }
       if (parsed.anki && typeof parsed.anki === 'object') {
-        const curDecks = this.state.anki?.decks || [];
+        const curAnki = this.state.anki || {};
+        const curDecks = curAnki.decks || [];
         if (!curDecks.length && Array.isArray(parsed.anki.decks) && parsed.anki.decks.length) {
-          this.state.anki = { ...(this.state.anki || {}), ...parsed.anki, updatedAt: nowTs };
+          this.state.anki = { ...curAnki, ...parsed.anki, updatedAt: nowTs };
         }
+        // Always merge syncHistory & reviewByDay even if local decks already exist
+        const histByTs = new Map();
+        for (const p of [...(parsed.anki.syncHistory || []), ...(this.state.anki.syncHistory || [])]) {
+          if (!p || !Number.isFinite(Number(p.ts))) continue;
+          histByTs.set(Number(p.ts), {
+            ts: Number(p.ts),
+            b: Number(p.b) || 0,
+            r: Number(p.r) || 0,
+            g: Number(p.g) || 0,
+            tot: Number(p.tot ?? ((Number(p.b) || 0) + (Number(p.r) || 0) + (Number(p.g) || 0))),
+            estMin: Number(p.estMin) || 0
+          });
+        }
+        this.state.anki.syncHistory = Array.from(histByTs.values())
+          .sort((a, b) => a.ts - b.ts)
+          .slice(-180);
+
+        const curRev = (this.state.anki.reviewByDay && typeof this.state.anki.reviewByDay === 'object') ? this.state.anki.reviewByDay : {};
+        const incRev = (parsed.anki.reviewByDay && typeof parsed.anki.reviewByDay === 'object') ? parsed.anki.reviewByDay : {};
+        const allDays = Array.from(new Set([...Object.keys(curRev), ...Object.keys(incRev)])).sort().slice(-365);
+        const mergedRev = {};
+        for (const d of allDays) {
+          const cd = curRev[d] || {};
+          const iday = incRev[d] || {};
+          const outDay = {};
+          for (const dn of new Set([...Object.keys(cd), ...Object.keys(iday)])) {
+            const sec = Math.max(Number(cd[dn]?.sec) || 0, Number(iday[dn]?.sec) || 0);
+            const cards = Math.max(Number(cd[dn]?.cards) || 0, Number(iday[dn]?.cards) || 0);
+            if (sec > 0 || cards > 0) outDay[dn] = { sec, cards };
+          }
+          if (Object.keys(outDay).length) mergedRev[d] = outDay;
+        }
+        this.state.anki.reviewByDay = mergedRev;
+        this.state.anki.updatedAt = nowTs;
       }
 
       const mergeListById = (field) => {
         if (!Array.isArray(parsed[field])) return;
         if (!Array.isArray(this.state[field])) this.state[field] = [];
-        const ids = new Set(this.state[field].map((x) => x.id));
+        const ids = new Set(this.state[field].map((x) => String(x.id)));
         for (const item of parsed[field]) {
-          if (item && !ids.has(item.id)) {
+          if (!item || item.id === undefined) continue;
+          if (isTombstoned(item.id, item.updatedAt || 0)) continue;
+          if (!ids.has(String(item.id))) {
             this.state[field].push({ ...item, updatedAt: item.updatedAt || nowTs });
-            ids.add(item.id);
+            ids.add(String(item.id));
           }
         }
       };

@@ -197,7 +197,7 @@ export function renderWeekView(root, { toast, navigate, openModal, closeModal, p
                     </div>
                   </div>
                 `;
-                }).join('') || `<div class="xs soft" style="padding:4px 10px;">Keine Checklisten-Punkte (Todo hierher ziehen zum Verschieben)</div>`}
+                }).join('') || `<div class="xs soft" style="padding:4px 10px;">Keine Checklisten-Punkte<span class="desktop-only"> (Todo hierher ziehen zum Verschieben)</span></div>`}
               </div>
             </div>
           `;
