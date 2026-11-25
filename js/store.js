@@ -58,15 +58,25 @@ export function isValidTimeStr(str) {
   return typeof str === 'string' && /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(str.trim());
 }
 
+export function isAnkiDeckExcluded(fullName = '', shortName = '', excludedDecks = []) {
+  if (!Array.isArray(excludedDecks) || !excludedDecks.length) return false;
+  const path = String(fullName || shortName || '');
+  const leaf = String(shortName || path.split('::').pop() || '');
+  for (const ex of excludedDecks) {
+    if (!ex) continue;
+    if (path === ex || leaf === ex || path.startsWith(`${ex}::`)) return true;
+  }
+  return false;
+}
+
 export function filterLeafAnkiDecks(decks = [], excludedDecks = []) {
   if (!Array.isArray(decks) || !decks.length) return [];
-  const excludedSet = new Set(Array.isArray(excludedDecks) ? excludedDecks : []);
   const fullPaths = new Set(decks.map((d) => d?.fullName || d?.name).filter(Boolean));
   return decks.filter((d) => {
     if (!d) return false;
     const path = d.fullName || d.name;
     if (!path) return false;
-    if (excludedSet.has(path) || excludedSet.has(d.name)) return false;
+    if (isAnkiDeckExcluded(path, d.name, excludedDecks)) return false;
     const prefix = `${path}::`;
     for (const other of fullPaths) {
       if (other.startsWith(prefix)) return false;
@@ -206,7 +216,11 @@ export function createDefaultState() {
       manualLearn: 0,       // Rot
       manualReview: 0,      // Grün
       manualDue: 0,         // legacy fallback
+      autoLogTime: true,    // automatically sync today's real Anki revlog time into daily Anki entry
       decks: [],    // { name, fullName, group, due, newCards, learnCards, reviewCards }
+      syncHistory: [], // [{ ts, b, r, g, tot, estMin }] — 1 point per Anki sync
+      reviewByDay: {}, // { 'YYYY-MM-DD': { [deckFullName]: { sec, cards } } } from Anki revlog
+      paceStats: null, // { secNewReal, cntNew, secLearnReal, cntLearn, secRevReal, cntRev }
       excludedDecks: [], // deck names/fullNames manually hidden from count & time
       excludedMeta: {}   // { [deckKey]: { excluded: boolean, ts: number } } for conflict-safe 2-way merge
     },
@@ -411,7 +425,12 @@ class Store {
     delete merged.dg;
     delete merged.planBlocks;
     delete merged.tasks;
-    if (merged.anki) delete merged.anki.todayMinutes;
+    if (merged.anki) {
+      delete merged.anki.todayMinutes;
+      if (!Array.isArray(merged.anki.syncHistory)) merged.anki.syncHistory = [];
+      if (!merged.anki.reviewByDay || typeof merged.anki.reviewByDay !== 'object') merged.anki.reviewByDay = {};
+      if (merged.anki.autoLogTime === undefined) merged.anki.autoLogTime = true;
+    }
     return this._migrateState(merged, Number(data?.schemaVersion || 1));
   }
 
@@ -1657,18 +1676,23 @@ class Store {
     };
   }
 
-  // ---------- Subject Balance Board (#3) ----------
+  // ---------- Subject Balance & Realistic Time per Subject (Lernen + Echte Anki-Zeit) ----------
 
-  getSubjectBalance() {
+  getSubjectBalance({ days = 0, todayStr = toDateStr() } = {}) {
+    const minDate = days > 0 ? addDays(todayStr, -(days - 1)) : '';
+    const inRange = (dStr) => !minDate || (dStr >= minDate && dStr <= todayStr);
     const groups = {};
+
     const ensureGroup = (groupName) => {
-      const key = groupName.trim();
+      const key = (groupName || 'Sonstiges').trim() || 'Sonstiges';
       if (!groups[key]) {
         groups[key] = {
           subject: key,
           modIds: new Set(),
           ankiDecks: new Set(),
-          learnMin: 0,
+          focusMin: 0,
+          ankiSec: 0,
+          ankiReviewedCards: 0,
           sessions: 0,
           openBacklog: 0,
           chkDone: 0,
@@ -1689,36 +1713,102 @@ class Store {
     }
 
     const matchSubjectByText = (text = '') => {
-      const low = text.toLowerCase();
+      const low = (text || '').toLowerCase();
+      if (!low) return null;
       for (const g of Object.values(groups)) {
         const base = g.subject.toLowerCase();
         const shortToken = base.split(/\s+/)[0]; // e.g. 'hm', 'tm', 'mkl', 'wk', 'fertigungstechnik'
         if (low.includes(base) || (shortToken.length >= 2 && new RegExp(`\\b${shortToken.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(low))) {
           return g;
         }
-        if (base.includes('fertigung') && /\bft\b/i.test(low)) return g;
-        if (base.includes('werkstoff') && /\bwk\b/i.test(low)) return g;
+        if ((base.startsWith('hm') || base.includes('mathematik')) && /\b(hm\d?|mathe|mathematik|höhere math)\b/i.test(low)) return g;
+        if ((base.startsWith('tm') || base.includes('mechanik')) && /\b(tm\d?|mechanik|statik|festigkeitslehre)\b/i.test(low)) return g;
+        if ((base.startsWith('mkl') || base.includes('konstruktion')) && /\b(mkl|konstruktion|maschinenkonstruktion)\b/i.test(low)) return g;
+        if ((base.startsWith('ft') || base.includes('fertigung')) && /\b(ft\d?|fertigung|fertigungstechnik)\b/i.test(low)) return g;
+        if ((base.startsWith('wk') || base.includes('werkstoff')) && /\b(wk\d?|werkstoff|werkstoffkunde)\b/i.test(low)) return g;
+        if ((base.startsWith('info') || base.includes('informatik')) && /\b(info|informatik)\b/i.test(low)) return g;
       }
       return null;
     };
 
-    // Aggregate tracked learning time per subject (only real block durations: blockMin or sum-mode m, never blindly sum cumulative 'max' entries!)
+    const matchDeckToGroup = (fullName = '', shortName = '') => {
+      const dFullLow = (fullName || '').toLowerCase();
+      const dLow = (shortName || '').toLowerCase();
+      const explicit = Object.values(groups).find((g) => {
+        for (const ad of g.ankiDecks) {
+          if (dFullLow === ad || dLow === ad || (dFullLow && dFullLow.startsWith(`${ad}::`))) return true;
+        }
+        return false;
+      });
+      if (explicit) return explicit;
+      const byText = matchSubjectByText(fullName) || matchSubjectByText(shortName);
+      if (byText) return byText;
+
+      // Fallback: derive clean subject name from deck hierarchy so 100 % of non-excluded Anki study time is visible
+      const rawParts = (fullName || shortName || '').split('::').map((p) => p.trim()).filter(Boolean);
+      const genericRe = /^(studium|kit|uni|maschinenbau|mach|bachelor|1\.\s*sem(?:ester)?|2\.\s*sem(?:ester)?|ws\s*\d+|ss\s*\d+|anker|karten)$/i;
+      const meaningful = rawParts.find((p) => !genericRe.test(p)) || rawParts[rawParts.length - 1] || 'Anki (Sonstiges)';
+      return ensureGroup(meaningful);
+    };
+
+    const excludedDecks = this.state.anki?.excludedDecks || [];
+    const reviewByDay = this.state.anki?.reviewByDay || {};
+
+    // 1. Aggregate real Anki review time per deck & day directly from Anki's revlog
+    for (const [d, dayDecks] of Object.entries(reviewByDay)) {
+      if (!inRange(d) || !dayDecks || typeof dayDecks !== 'object') continue;
+      for (const [fullName, stat] of Object.entries(dayDecks)) {
+        if (!stat) continue;
+        const sec = Number(stat.sec) || 0;
+        const cards = Number(stat.cards) || 0;
+        if (sec <= 0 && cards <= 0) continue;
+        const parts = fullName.split('::');
+        const shortName = parts[parts.length - 1] || fullName;
+        if (isAnkiDeckExcluded(fullName, shortName, excludedDecks)) continue;
+        const target = matchDeckToGroup(fullName, shortName);
+        if (target) {
+          target.ankiSec += sec;
+          target.ankiReviewedCards += cards;
+        }
+      }
+    }
+
+    // 2. Aggregate tracked non-Anki learning time (k === 'l') + fallback subject-tagged Anki on days without revlog
+    const learnCountByDay = {};
     for (const x of this.state.e) {
+      if (x.k === 'l') learnCountByDay[x.d] = (learnCountByDay[x.d] || 0) + 1;
+    }
+
+    for (const x of this.state.e) {
+      if (!inRange(x.d)) continue;
       if (x.k !== 'l' && x.k !== 'a') continue;
-      const dur = Number(x.blockMin || (this.state.mode === 'sum' ? x.m : 0) || 0);
+      if (x.autoAnki) continue; // Already covered with per-deck precision via reviewByDay!
+
+      let dur = Number(x.blockMin || 0);
+      if (dur <= 0) {
+        if (this.state.mode === 'sum' || (x.k === 'l' && learnCountByDay[x.d] === 1)) {
+          dur = Number(x.m) || 0;
+        }
+      }
       if (dur <= 0) continue;
+
       let target = null;
       if (x.mod) {
         target = Object.values(groups).find((g) => g.modIds.has(x.mod)) || null;
       }
       if (!target && x.note) target = matchSubjectByText(x.note);
-      if (target) {
-        target.learnMin += dur;
+      if (!target) continue;
+
+      if (x.k === 'l') {
+        target.focusMin += dur;
         target.sessions++;
+      } else if (x.k === 'a' && !reviewByDay[x.d]) {
+        // Fallback only for days before AnkiConnect revlog existed
+        target.ankiSec += dur * 60;
       }
     }
 
-    // Open/overdue backlog per subject
+    // 3. Open/overdue backlog per subject
     for (const b of (this.state.backlog || [])) {
       if (b.status === 'done') continue;
       let target = b.moduleId ? Object.values(groups).find((g) => g.modIds.has(b.moduleId)) : null;
@@ -1726,8 +1816,9 @@ class Store {
       if (target) target.openBacklog++;
     }
 
-    // Checklist completion per subject
+    // 4. Checklist completion per subject
     for (const c of (this.state.checklist || [])) {
+      if (!inRange(c.d) && days > 0) continue;
       let target = c.moduleId ? Object.values(groups).find((g) => g.modIds.has(c.moduleId)) : null;
       if (!target) target = matchSubjectByText(c.title);
       if (target) {
@@ -1736,13 +1827,10 @@ class Store {
       }
     }
 
-    // Match leaf & non-excluded Anki decks only (exclude parent groups & manually excluded decks)
-    const activeLeafDecks = filterLeafAnkiDecks(this.state.anki?.decks || [], this.state.anki?.excludedDecks || []);
+    // 5. Current due Anki cards per subject (leaf & non-excluded)
+    const activeLeafDecks = filterLeafAnkiDecks(this.state.anki?.decks || [], excludedDecks);
     for (const d of activeLeafDecks) {
-      const dLow = (d.name || '').toLowerCase();
-      const dFullLow = (d.fullName || '').toLowerCase();
-      let target = Object.values(groups).find((g) => g.ankiDecks.has(dLow) || (dFullLow && g.ankiDecks.has(dFullLow)))
-        || matchSubjectByText(d.name);
+      const target = matchDeckToGroup(d.fullName || d.name, d.name);
       if (target) {
         target.ankiNew += Number(d.newCards) || 0;
         target.ankiLearn += Number(d.learnCards) || 0;
@@ -1751,18 +1839,29 @@ class Store {
     }
 
     return Object.values(groups)
-      .map((g) => ({
-        subject: g.subject,
-        learnMin: Math.round(g.learnMin),
-        sessions: g.sessions,
-        openBacklog: g.openBacklog,
-        chkDone: g.chkDone,
-        chkTotal: g.chkTotal,
-        ankiNew: g.ankiNew,
-        ankiLearn: g.ankiLearn,
-        ankiReview: g.ankiReview,
-        ankiTotal: g.ankiNew + g.ankiLearn + g.ankiReview
-      }))
+      .map((g) => {
+        const focusMin = Math.round(g.focusMin);
+        const ankiMin = Math.round(g.ankiSec / 60);
+        const learnMin = focusMin + ankiMin;
+        return {
+          subject: g.subject,
+          modIds: Array.from(g.modIds),
+          focusMin,
+          ankiMin,
+          learnMin,
+          ankiReviewedCards: g.ankiReviewedCards,
+          ankiAvgSec: g.ankiReviewedCards > 0 ? Math.round(g.ankiSec / g.ankiReviewedCards) : 0,
+          sessions: g.sessions,
+          openBacklog: g.openBacklog,
+          chkDone: g.chkDone,
+          chkTotal: g.chkTotal,
+          ankiNew: g.ankiNew,
+          ankiLearn: g.ankiLearn,
+          ankiReview: g.ankiReview,
+          ankiTotal: g.ankiNew + g.ankiLearn + g.ankiReview
+        };
+      })
+      .filter((s) => s.modIds.length > 0 || s.learnMin > 0 || s.ankiTotal > 0 || s.openBacklog > 0 || s.chkTotal > 0)
       .sort((a, b) => b.learnMin - a.learnMin || b.openBacklog - a.openBacklog || a.subject.localeCompare(b.subject));
   }
 
@@ -1948,12 +2047,12 @@ class Store {
 
     if (subj.length) {
       lines.push(
-        '## 3. Fach-Balance',
-        '| Fach | Lernzeit | Offener Rückstand | Checkliste | Anki (B/R/G) |',
-        '| :--- | :---: | :---: | :---: | :---: |'
+        '## 3. Investierte Zeit pro Fach (Lernen + Anki)',
+        '| Fach | Gesamt | Lernen | Anki (echt) | Offener Rückstand | Checkliste | Anki fällig (B/R/G) |',
+        '| :--- | :---: | :---: | :---: | :---: | :---: | :---: |'
       );
       for (const s of subj) {
-        lines.push(`| ${s.subject} | ${fmtMin(s.learnMin)} | ${s.openBacklog} | ${s.chkDone}/${s.chkTotal} | ${s.ankiTotal > 0 ? `${s.ankiNew}/${s.ankiLearn}/${s.ankiReview}` : '–'} |`);
+        lines.push(`| ${s.subject} | ${fmtMin(s.learnMin)} | ${fmtMin(s.focusMin)} | ${fmtMin(s.ankiMin)}${s.ankiReviewedCards > 0 ? ` (${s.ankiReviewedCards} K.)` : ''} | ${s.openBacklog} | ${s.chkDone}/${s.chkTotal} | ${s.ankiTotal > 0 ? `${s.ankiNew}/${s.ankiLearn}/${s.ankiReview}` : '–'} |`);
       }
       lines.push('');
     }

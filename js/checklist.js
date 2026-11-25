@@ -789,6 +789,66 @@ export function setLectureAttendance(uid, dStr, status) {
   store.save();
 }
 
+export function getAttendedUniMinutesBySubject({ days = 0, todayStr = toDateStr(), nowDate = new Date() } = {}) {
+  const startDateStr = days > 0 ? addDays(todayStr, -(days - 1)) : addDays(todayStr, -150);
+  const nowMin = nowDate.getHours() * 60 + nowDate.getMinutes();
+  const minAutoDate = addDays(todayStr, -2);
+
+  // Days in the past where live lectures were actually auto-booked into e[]
+  const activeAutoDays = new Set();
+  for (const x of (store.state.e || [])) {
+    if (x.k === 'p' && x.autoLecture && x.d >= startDateStr && x.d <= todayStr) {
+      activeAutoDays.add(x.d);
+    }
+  }
+
+  const icsEvents = store.state.icsRaw ? expandIcsEventsInRange(store.state.icsRaw, startDateStr, todayStr) : [];
+  const bySubject = {};
+
+  const addMin = (subjName, mins) => {
+    const clean = (subjName || 'Sonstiges').replace(/\s*\([^)]+\)/, '').trim() || 'Sonstiges';
+    bySubject[clean] = (bySubject[clean] || 0) + mins;
+  };
+
+  for (const ev of icsEvents) {
+    const rule = ev.moduleId ? store.state.modules?.[ev.moduleId] : null;
+    const baseMode = rule?.attendance || 'live';
+    const typeOv = store.state.eventOverrides?.[ev.uid] || null;
+    if (typeOv === 'cancelled' || baseMode === 'skip') continue;
+
+    const attOv = store.state.lectureAttendance?.[ev.uid];
+    const ended = ev.d < todayStr || (ev.d === todayStr && nowMin >= timeToMin(ev.end));
+    let attended = false;
+    if (attOv === 'attended') attended = true;
+    else if (attOv === 'skipped') attended = false;
+    else if (baseMode === 'live' && store.state.autoLogLectures && ended && (ev.d >= minAutoDate || activeAutoDays.has(ev.d))) {
+      attended = true;
+    }
+    if (!attended) continue;
+
+    const dur = Math.max(15, timeToMin(ev.end) - timeToMin(ev.start));
+    const subj = rule?.subjectGroup || rule?.shortName || ev.subjectGroup || ev.shortName || 'Sonstiges';
+    addMin(subj, dur);
+  }
+
+  // Also include attended custom events on active days
+  const customDates = new Set([...activeAutoDays, todayStr, addDays(todayStr, -1), addDays(todayStr, -2)]);
+  for (const dStr of customDates) {
+    if (dStr < startDateStr || dStr > todayStr) continue;
+    for (const ev of expandCustomEventsForDay(dStr)) {
+      if (store.state.eventOverrides?.[ev.uid] === 'cancelled') continue;
+      const attOv = store.state.lectureAttendance?.[ev.uid];
+      const ended = dStr < todayStr || (dStr === todayStr && nowMin >= timeToMin(ev.end));
+      const attended = attOv === 'attended' || (attOv !== 'skipped' && store.state.autoLogLectures && ended);
+      if (!attended) continue;
+      const dur = Math.max(15, timeToMin(ev.end) - timeToMin(ev.start));
+      addMin(ev.shortName || ev.summary, dur);
+    }
+  }
+
+  return bySubject;
+}
+
 // ---------- Text-Plan Parser & Exporter ----------
 
 export function parseTextChecklistPlan(rawText, referenceYear = new Date().getFullYear()) {

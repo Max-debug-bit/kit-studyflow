@@ -320,6 +320,51 @@ export function mergeStates(localRaw, remoteRaw) {
     merged.excludedDecks = mergedExDecks;
     merged.excludedMeta = mergedExMeta;
 
+    // Merge syncHistory points chronologically (deduplicating identical snapshots within 5s)
+    const rawSyncHist = [
+      ...(Array.isArray(lAnki.syncHistory) ? lAnki.syncHistory : []),
+      ...(Array.isArray(rAnki.syncHistory) ? rAnki.syncHistory : [])
+    ]
+      .filter((p) => p && Number(p.ts) > 0)
+      .sort((a, b) => a.ts - b.ts);
+    const mergedSyncHist = [];
+    for (const p of rawSyncHist) {
+      const prev = mergedSyncHist[mergedSyncHist.length - 1];
+      if (prev && Math.abs(p.ts - prev.ts) < 5000 && prev.b === p.b && prev.r === p.r && prev.g === p.g) {
+        continue;
+      }
+      mergedSyncHist.push({
+        ts: Number(p.ts),
+        b: Number(p.b) || 0,
+        r: Number(p.r) || 0,
+        g: Number(p.g) || 0,
+        tot: Number(p.tot ?? ((Number(p.b) || 0) + (Number(p.r) || 0) + (Number(p.g) || 0))),
+        estMin: Number(p.estMin) || 0
+      });
+    }
+    merged.syncHistory = mergedSyncHist.slice(-180);
+
+    // Merge reviewByDay (per-day, per-deck monotonic max of reviewed seconds & cards; retain latest 365 days)
+    const lRev = (lAnki.reviewByDay && typeof lAnki.reviewByDay === 'object') ? lAnki.reviewByDay : {};
+    const rRev = (rAnki.reviewByDay && typeof rAnki.reviewByDay === 'object') ? rAnki.reviewByDay : {};
+    const allRevDays = Array.from(new Set([...Object.keys(lRev), ...Object.keys(rRev)])).sort().slice(-365);
+    const mergedRevByDay = {};
+    for (const d of allRevDays) {
+      const ld = lRev[d] || {};
+      const rd = rRev[d] || {};
+      const deckNames = new Set([...Object.keys(ld), ...Object.keys(rd)]);
+      const outDay = {};
+      for (const dn of deckNames) {
+        const ls = ld[dn];
+        const rs = rd[dn];
+        const sec = Math.max(Number(ls?.sec) || 0, Number(rs?.sec) || 0);
+        const cards = Math.max(Number(ls?.cards) || 0, Number(rs?.cards) || 0);
+        if (sec > 0 || cards > 0) outDay[dn] = { sec, cards };
+      }
+      if (Object.keys(outDay).length) mergedRevByDay[d] = outDay;
+    }
+    merged.reviewByDay = mergedRevByDay;
+
     merged.updatedAt = Math.max(lTs, rTs);
     return merged;
   };

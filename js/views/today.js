@@ -33,13 +33,22 @@ import {
   setLectureAttendance,
   syncDayLecturesToProductive
 } from '../checklist.js';
-import { getAnkiLoadSummary, syncAnkiConnect, setManualAnki, toggleExcludedAnkiDeck } from '../anki.js';
+import {
+  getAnkiLoadSummary,
+  getAnkiReviewAnalytics,
+  syncAnkiConnect,
+  syncDayAnkiFromRevlog,
+  setManualAnki,
+  toggleExcludedAnkiDeck
+} from '../anki.js';
 import {
   renderDailyRingSVG,
   renderDayTimelineSVG,
   renderRestOfDaySVG,
   renderTimerProjectionSVG,
-  renderCaffeineCurveSVG
+  renderCaffeineCurveSVG,
+  renderAnkiSyncChartSVG,
+  bindChartTooltips
 } from '../charts.js';
 import { icon } from '../icons.js';
 
@@ -69,10 +78,11 @@ export function renderTodayView(root, ctx) {
   const tomorrow = addDays(today, 1);
   reconcileBacklogStatus({ todayStr: today });
 
-  // Sync today's attended live lectures automatically to Vorlesung/Produktiv (p)
+  // Sync today's attended live lectures automatically to Vorlesung/Produktiv (p) & real Anki revlog time to Anki (a)
   if (store.state.autoLogLectures) {
     syncDayLecturesToProductive(today, { save: false });
   }
+  syncDayAnkiFromRevlog(today, { save: false });
 
   const day = store.getDayBreakdown(today);
   const isRest = store.isRestDay(today);
@@ -83,6 +93,8 @@ export function renderTodayView(root, ctx) {
   const caf = store.getCaffeineTodaySummary(now);
   const todayEntries = store.getEntriesForDate(today);
   const anki = getAnkiLoadSummary();
+  const ankiRev = getAnkiReviewAnalytics(today);
+  const recentAnkiSyncs = ankiRev.syncHistory.slice(-20);
   const calibratedCatalog = store.getCalibratedTaskCatalog();
   const minDailyAnki = Math.max(10, Number(store.state.anki.minDailyAnkiMin) || 30);
   const ankiSyncedToday = Boolean(anki.lastSyncAt && toDateStr(new Date(anki.lastSyncAt)) === today);
@@ -374,6 +386,17 @@ export function renderTodayView(root, ctx) {
               </div>
             </div>
 
+            ${ankiRev.todayCards > 0 ? `
+              <div style="margin-bottom:10px;padding:7px 10px;border-radius:var(--radius-xs);background:var(--bg-soft);border:1px solid var(--border);">
+                <div class="xs mono" style="color:var(--anki);font-weight:640;">
+                  Heute in Anki geschafft: ${fmtMin(ankiRev.todayMin)} (${ankiRev.todayCards} Karten)
+                </div>
+                <div class="xs muted" style="margin-top:3px;">
+                  ${ankiRev.todayDecks.slice(0, 6).map((d) => `${esc(d.name)} <strong>${fmtMin(d.min)}</strong> (${d.cards})`).join(' · ')}
+                </div>
+              </div>
+            ` : ''}
+
             ${anki.decks.length ? `
               <div class="entry-list" style="margin-bottom:10px;">
                 ${anki.decks.slice(0, 8).map((d) => `
@@ -385,6 +408,17 @@ export function renderTodayView(root, ctx) {
                     </div>
                   </div>
                 `).join('')}
+              </div>
+            ` : ''}
+
+            ${recentAnkiSyncs.length ? `
+              <div style="margin-bottom:10px;">
+                <div class="row-between xs soft" style="margin-bottom:4px;">
+                  <span>Sync-Verlauf (Blau · Rot · Grün + Gesamt)</span>
+                  <span class="mono">${recentAnkiSyncs.length} ${recentAnkiSyncs.length === 1 ? 'Punkt' : 'Punkte'}</span>
+                </div>
+                <div class="chart-box">${renderAnkiSyncChartSVG(recentAnkiSyncs, { mode: 'all', compact: true })}</div>
+                <div class="chart-tooltip">Tippe auf einen Sync-Punkt für Uhrzeit & Kartenstände.</div>
               </div>
             ` : ''}
 
@@ -651,7 +685,7 @@ export function renderTodayView(root, ctx) {
             ${recentEntries.map((x) => {
               const counts = countingByDate[x.d]?.has(x.id);
               const badge = x.k === 'a'
-                ? '<span class="pill anki">Anki</span>'
+                ? `<span class="pill anki">${x.autoAnki ? 'Anki (Auto)' : 'Anki'}</span>`
                 : x.k === 'p'
                   ? `<span class="pill prod">${x.autoLecture ? 'Vorlesung (Auto)' : 'Vorlesung / Prod.'}</span>`
                   : '<span class="pill learn">Lernen</span>';
@@ -868,7 +902,8 @@ export function renderTodayView(root, ctx) {
     try {
       const res = await syncAnkiConnect();
       const parentInfo = res.filteredParents?.length ? ` · Übergruppe ${res.filteredParents.join(', ')} gefiltert` : '';
-      toast(`AnkiConnect: ${res.totalDue} fällige Karten (${res.deckCount} Stapel${parentInfo}).`, 'ok');
+      const todayInfo = res.todayRealMin > 0 ? ` · Heute gelernt: ${fmtMin(res.todayRealMin)} (${res.todayRealCards} K.)` : '';
+      toast(`AnkiConnect: ${res.totalDue} fällige Karten (${res.deckCount} Stapel${parentInfo})${todayInfo}.`, 'ok');
     } catch (err) {
       toast(`AnkiConnect nicht erreichbar (${err.message}).`, 'err');
     }
@@ -1115,6 +1150,7 @@ export function renderTodayView(root, ctx) {
       scheduleTick();
     }, delayMs);
   };
+  bindChartTooltips(root);
   scheduleTick();
 }
 

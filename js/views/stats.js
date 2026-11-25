@@ -17,11 +17,18 @@ import {
   renderCaffeine14dSVG,
   renderHeatmap20WeeksSVG,
   renderSimpleBarsSVG,
+  renderAnkiSyncChartSVG,
   bindChartTooltips
 } from '../charts.js';
+import { getAnkiReviewAnalytics } from '../anki.js';
+import { getAttendedUniMinutesBySubject } from '../checklist.js';
 import { icon } from '../icons.js';
 
 let historyRange = 14;
+let subjectRangeDays = 0; // 0 = Gesamt, 30 = 30T, 7 = 7T
+let includeUniInSubject = false;
+let ankiGraphMode = 'all'; // 'all' | 'brg' | 'total'
+let ankiGraphLimit = 30;   // 30 | 0 (Alle)
 
 export function renderStatsView(root, { toast } = {}) {
   const now = new Date();
@@ -110,8 +117,53 @@ export function renderStatsView(root, { toast } = {}) {
   const canCompareCaf = st.cafStats.withCafCount >= 2 && st.cafStats.withoutCafCount >= 2;
   const calibration = store.getCalibrationSummary();
   const load7 = store.getLoadSummary7d(today);
-  const subjectBalance = store.getSubjectBalance();
-  const maxSubjMin = Math.max(60, ...subjectBalance.map((s) => s.learnMin));
+  const ankiRev = getAnkiReviewAnalytics(today);
+  const shownAnkiSyncs = ankiGraphLimit > 0 ? ankiRev.syncHistory.slice(-ankiGraphLimit) : ankiRev.syncHistory;
+  const ps = ankiRev.paceStats;
+  const hasRealPace = Boolean(ps && (ps.cntNew + ps.cntLearn + ps.cntRev) >= 10);
+
+  const rawSubjectBalance = store.getSubjectBalance({ days: subjectRangeDays, todayStr: today });
+  const uniBySubj = includeUniInSubject ? getAttendedUniMinutesBySubject({ days: subjectRangeDays, todayStr: today, nowDate: now }) : {};
+  const subjMap = new Map();
+  for (const s of rawSubjectBalance) {
+    subjMap.set(s.subject, { ...s, uniMin: 0 });
+  }
+  if (includeUniInSubject) {
+    for (const [subjName, uMin] of Object.entries(uniBySubj)) {
+      if (uMin <= 0) continue;
+      if (subjMap.has(subjName)) {
+        subjMap.get(subjName).uniMin += uMin;
+      } else {
+        subjMap.set(subjName, {
+          subject: subjName,
+          focusMin: 0,
+          ankiMin: 0,
+          learnMin: 0,
+          uniMin: uMin,
+          ankiReviewedCards: 0,
+          ankiAvgSec: 0,
+          sessions: 0,
+          openBacklog: 0,
+          chkDone: 0,
+          chkTotal: 0,
+          ankiNew: 0,
+          ankiLearn: 0,
+          ankiReview: 0,
+          ankiTotal: 0
+        });
+      }
+    }
+  }
+  const subjectRows = Array.from(subjMap.values())
+    .map((s) => ({ ...s, investMin: s.focusMin + s.ankiMin + (s.uniMin || 0) }))
+    .sort((a, b) => b.investMin - a.investMin || b.openBacklog - a.openBacklog || a.subject.localeCompare(b.subject));
+
+  const maxSubjMin = Math.max(60, ...subjectRows.map((s) => s.investMin));
+  const totalSubjFocusMin = subjectRows.reduce((acc, s) => acc + s.focusMin, 0);
+  const totalSubjAnkiMin = subjectRows.reduce((acc, s) => acc + s.ankiMin, 0);
+  const totalSubjUniMin = subjectRows.reduce((acc, s) => acc + (s.uniMin || 0), 0);
+  const totalSubjInvestMin = totalSubjFocusMin + totalSubjAnkiMin + totalSubjUniMin;
+
   const patterns = store.getPersonalPatterns(today);
   const actMap = { video: 'Video', review: 'Nacharbeit', homework: 'HA', anki: 'Anki', exam: 'Klausur' };
 
@@ -211,44 +263,153 @@ export function renderStatsView(root, { toast } = {}) {
         </div>
       </section>
 
-      <!-- 2b. Fach-Balance-Board (#3) & Persönliche Lern-Muster (#7) -->
-      <div class="grid-2">
-        <section class="card">
-          <div class="card-header">
-            <h2 class="card-title">${icon('layers', 15)} Fach-Balance-Board</h2>
-            <span class="xs soft">Wird an Gemini übergeben</span>
+      <!-- 2b. Investierte Zeit pro Fach (Lernen + Echte Anki-Zeit + opt. Live-Uni) -->
+      <section class="card">
+        <div class="card-header" style="flex-wrap:wrap;gap:8px;">
+          <div>
+            <h2 class="card-title">${icon('layers', 15)} Investierte Zeit pro Fach</h2>
+            <div class="xs muted" style="margin-top:2px;">
+              Gesamt: <strong class="mono">${fmtHours(totalSubjInvestMin)}</strong>
+              · Lernen <span class="mono" style="color:var(--learn);">${fmtHours(totalSubjFocusMin)}</span>
+              · Anki (echt) <span class="mono" style="color:var(--anki);">${fmtHours(totalSubjAnkiMin)}</span>
+              ${includeUniInSubject ? ` · Live-Uni <span class="mono" style="color:var(--prod);">${fmtHours(totalSubjUniMin)}</span>` : ''}
+            </div>
           </div>
-          ${subjectBalance.length ? `
-            <div class="entry-list">
-              ${subjectBalance.map((s) => {
-                const barW = Math.min(100, Math.round((s.learnMin / maxSubjMin) * 100));
-                return `
-                  <div class="entry-row" style="flex-direction:column;align-items:stretch;gap:6px;">
-                    <div class="row-between">
+          <div class="row" style="gap:6px;">
+            <div class="segmented">
+              <button type="button" data-subj-days="0" class="${subjectRangeDays === 0 ? 'active' : ''}">Gesamt</button>
+              <button type="button" data-subj-days="30" class="${subjectRangeDays === 30 ? 'active' : ''}">30 T</button>
+              <button type="button" data-subj-days="7" class="${subjectRangeDays === 7 ? 'active' : ''}">7 T</button>
+            </div>
+            <button type="button" class="btn btn-xs ${includeUniInSubject ? 'btn-primary' : ''}" id="btn-subj-uni" title="Besuchte Live-Vorlesungen & Übungen mit einrechnen">
+              + Live-Uni
+            </button>
+          </div>
+        </div>
+
+        <div class="legend" style="margin-bottom:10px;">
+          <span class="legend-item"><span class="legend-dot" style="background:var(--learn)"></span>Lernen (Videos / HA / Nacharbeit)</span>
+          <span class="legend-item"><span class="legend-dot" style="background:var(--anki)"></span>Anki (echte Zeit pro Stapel)</span>
+          ${includeUniInSubject ? `<span class="legend-item"><span class="legend-dot" style="background:var(--prod)"></span>Live-Vorlesung / Übung</span>` : ''}
+        </div>
+
+        ${!ankiRev.hasRevlog ? `
+          <div class="xs muted" style="margin-bottom:10px;padding:7px 10px;border-radius:var(--radius-xs);background:var(--bg-soft);border:1px solid var(--border);">
+            Tipp: Klicke am Laptop bei geöffnetem Anki einmal auf <strong>Sync</strong> — dann lädt StudyFlow automatisch deine echten Anki-Minuten pro Stapel (inkl. der letzten 6 Monate) in diese Übersicht.
+          </div>
+        ` : ''}
+
+        ${subjectRows.length ? `
+          <div class="entry-list">
+            ${subjectRows.map((s) => {
+              const focusW = maxSubjMin > 0 ? Math.min(100, (s.focusMin / maxSubjMin) * 100) : 0;
+              const ankiW = maxSubjMin > 0 ? Math.min(100 - focusW, (s.ankiMin / maxSubjMin) * 100) : 0;
+              const uniW = includeUniInSubject && maxSubjMin > 0 ? Math.min(100 - focusW - ankiW, ((s.uniMin || 0) / maxSubjMin) * 100) : 0;
+              const sharePct = totalSubjInvestMin > 0 ? Math.round((s.investMin / totalSubjInvestMin) * 100) : 0;
+              return `
+                <div class="entry-row" style="flex-direction:column;align-items:stretch;gap:6px;">
+                  <div class="row-between" style="gap:8px;flex-wrap:wrap;">
+                    <div class="row" style="gap:6px;">
                       <strong class="small">${esc(s.subject)}</strong>
-                      <div class="row xs mono" style="gap:6px;">
-                        <span class="pill learn">${fmtMin(s.learnMin)}</span>
-                        ${s.openBacklog > 0 ? `<span class="pill prod">${s.openBacklog} offen</span>` : '<span class="pill kit">0 offen</span>'}
-                        ${s.chkTotal > 0 ? `<span class="pill">${s.chkDone}/${s.chkTotal}</span>` : ''}
-                        ${s.ankiTotal > 0 ? `<span class="pill anki">${s.ankiNew}B·${s.ankiLearn}R·${s.ankiReview}G</span>` : ''}
-                      </div>
+                      ${s.investMin > 0 ? `<span class="xs soft mono">${sharePct} %</span>` : ''}
+                      <span class="pill both mono">${fmtMin(s.investMin)}</span>
                     </div>
-                    <div class="progress-track" style="height:4px;">
-                      <div class="progress-fill" style="width:${barW}%;background:var(--learn);"></div>
+                    <div class="row xs mono" style="gap:5px;">
+                      ${s.focusMin > 0 ? `<span class="pill learn" title="Lernzeit ohne Anki">Lernen ${fmtMin(s.focusMin)}</span>` : ''}
+                      ${s.ankiMin > 0 || s.ankiReviewedCards > 0 ? `<span class="pill anki" title="${s.ankiReviewedCards} Karten wiederholt${s.ankiAvgSec > 0 ? ` · Ø ${s.ankiAvgSec}s/Karte` : ''}">Anki ${fmtMin(s.ankiMin)}${s.ankiReviewedCards > 0 ? ` (${s.ankiReviewedCards})` : ''}</span>` : ''}
+                      ${includeUniInSubject && s.uniMin > 0 ? `<span class="pill prod">Uni ${fmtMin(s.uniMin)}</span>` : ''}
+                      ${s.openBacklog > 0 ? `<span class="pill prod">${s.openBacklog} offen</span>` : ''}
+                      ${s.ankiTotal > 0 ? `<span class="pill" title="Aktuell fällige Anki-Karten (Blau·Rot·Grün)">${s.ankiNew}B·${s.ankiLearn}R·${s.ankiReview}G</span>` : ''}
                     </div>
                   </div>
-                `;
-              }).join('')}
-            </div>
-          ` : '<div class="xs muted">Importiere deinen KIT-Kalender (.ics) oder lege Fächer unter Wochenplan an, um deine Fach-Balance zu sehen.</div>'}
-        </section>
+                  <div class="progress-stack">
+                    ${focusW > 0 ? `<div class="progress-seg" style="width:${focusW.toFixed(1)}%;background:var(--learn);"></div>` : ''}
+                    ${ankiW > 0 ? `<div class="progress-seg" style="width:${ankiW.toFixed(1)}%;background:var(--anki);"></div>` : ''}
+                    ${uniW > 0 ? `<div class="progress-seg" style="width:${uniW.toFixed(1)}%;background:var(--prod);"></div>` : ''}
+                  </div>
+                </div>
+              `;
+            }).join('')}
+          </div>
+        ` : '<div class="xs muted">Importiere deinen KIT-Kalender (.ics) oder synchronisiere Anki, um deine investierte Zeit pro Fach zu sehen.</div>'}
+      </section>
 
-        <section class="card">
+      <!-- 2c. Anki-Sync-Verlauf (Blau / Rot / Grün + Gesamt pro Sync) & Echte Anki-Zeit -->
+      <section class="card">
+        <div class="card-header" style="flex-wrap:wrap;gap:8px;">
+          <div>
+            <h2 class="card-title">${icon('activity', 15)} Anki-Sync-Verlauf</h2>
+            <div class="xs muted" style="margin-top:2px;">Jeder Sync erzeugt einen neuen Punkt · Blau (Neu), Rot (Lernen), Grün (Wiederholen) &amp; Gesamt</div>
+          </div>
+          <div class="row" style="gap:6px;">
+            <div class="segmented">
+              <button type="button" data-anki-gm="all" class="${ankiGraphMode === 'all' ? 'active' : ''}">Alle + Gesamt</button>
+              <button type="button" data-anki-gm="brg" class="${ankiGraphMode === 'brg' ? 'active' : ''}">Nur B·R·G</button>
+              <button type="button" data-anki-gm="total" class="${ankiGraphMode === 'total' ? 'active' : ''}">Nur Gesamt</button>
+            </div>
+            ${ankiRev.syncHistory.length > 30 ? `
+              <div class="segmented">
+                <button type="button" data-anki-lim="30" class="${ankiGraphLimit === 30 ? 'active' : ''}">30</button>
+                <button type="button" data-anki-lim="0" class="${ankiGraphLimit === 0 ? 'active' : ''}">Alle</button>
+              </div>
+            ` : ''}
+          </div>
+        </div>
+
+        <div class="grid-4" style="margin-bottom:12px;">
+          <div class="kpi-box">
+            <div class="kpi-label">Heute in Anki (echt)</div>
+            <div class="kpi-val anki">${fmtMin(ankiRev.todayMin)}</div>
+            <div class="xs muted">${ankiRev.todayCards} Karten</div>
+          </div>
+          <div class="kpi-box">
+            <div class="kpi-label">Letzte 7 Tage</div>
+            <div class="kpi-val anki">${fmtMin(ankiRev.weekMin)}</div>
+            <div class="xs muted">${ankiRev.weekCards} Karten</div>
+          </div>
+          <div class="kpi-box">
+            <div class="kpi-label">Anki-DB Gesamt</div>
+            <div class="kpi-val">${fmtHours(ankiRev.totalMin)}</div>
+            <div class="xs muted">${ankiRev.totalCards} Karten</div>
+          </div>
+          <div class="kpi-box">
+            <div class="kpi-label">Echtes Tempo (30T)</div>
+            <div class="kpi-val kit">${ankiRev.avgSecPerCard > 0 ? `Ø ${ankiRev.avgSecPerCard} s` : '–'}</div>
+            <div class="xs muted">${hasRealPace ? `B:${ps.secNewReal || '–'}s · R:${ps.secLearnReal || '–'}s · G:${ps.secRevReal || '–'}s` : 'pro Karte'}</div>
+          </div>
+        </div>
+
+        ${hasRealPace ? `
+          <div class="row-between" style="margin-bottom:10px;padding:6px 10px;border-radius:var(--radius-xs);background:var(--bg-soft);border:1px solid var(--border);">
+            <span class="xs muted">Gemessene Antwortdauer (30T): <strong>Blau ${ps.secNewReal || store.state.anki.secNew}s</strong> · <strong>Rot ${ps.secLearnReal || store.state.anki.secLearn}s</strong> · <strong>Grün ${ps.secRevReal || store.state.anki.secReview}s</strong> (aktuell eingestellt: ${store.state.anki.secNew}/${store.state.anki.secLearn}/${store.state.anki.secReview}s)</span>
+            <button type="button" class="btn btn-xs" id="btn-apply-anki-pace">Als Schätzgewicht übernehmen</button>
+          </div>
+        ` : ''}
+
+        ${shownAnkiSyncs.length ? `
+          <div class="legend" style="margin-bottom:6px;">
+            ${ankiGraphMode !== 'brg' ? `<span class="legend-item"><span class="legend-dot" style="background:var(--anki)"></span>Gesamt fällig</span>` : ''}
+            ${ankiGraphMode !== 'total' ? `
+              <span class="legend-item"><span class="legend-dot" style="background:var(--learn)"></span>Blau (Neu)</span>
+              <span class="legend-item"><span class="legend-dot" style="background:var(--danger)"></span>Rot (Lernen)</span>
+              <span class="legend-item"><span class="legend-dot" style="background:var(--kit)"></span>Grün (Wiederholen)</span>
+            ` : ''}
+            <span class="xs soft">(${shownAnkiSyncs.length} ${shownAnkiSyncs.length === 1 ? 'Sync-Punkt' : 'Sync-Punkte'})</span>
+          </div>
+          <div class="chart-box">${renderAnkiSyncChartSVG(shownAnkiSyncs, { mode: ankiGraphMode })}</div>
+          <div class="chart-tooltip">Tippe oder fahre über einen Sync-Punkt für Datum, Uhrzeit, Differenz &amp; B/R/G-Werte.</div>
+        ` : `
+          <div class="small muted">Noch keine Sync-Punkte aufgezeichnet. Sobald du auf „Heute“ deinen ersten Anki-Sync startest, erscheint hier automatisch jeder Sync als neuer Datenpunkt.</div>
+        `}
+      </section>
+
+      <!-- 2d. Persönliche Lern-Muster (#7) -->
+      <section class="card">
           <div class="card-header">
             <h2 class="card-title">${icon('spark', 15)} Persönliche Lern-Muster</h2>
             <span class="xs soft">Aus deinen echten Daten</span>
           </div>
-          <div class="stack" style="gap:10px;">
+          <div class="grid-3" style="gap:10px;">
             <div class="kpi-box">
               <div class="kpi-label">Kapazität nach Uni-Last (Lernzeit / Tag)</div>
               <div class="grid-3" style="margin-top:6px;">
@@ -270,7 +431,7 @@ export function renderStatsView(root, { toast } = {}) {
             <div class="kpi-box">
               <div class="kpi-label">Früh (&lt; 09:30) vs. Spät (&ge; 09:30) aufwachen</div>
               ${patterns.wakeCompare.ready ? `
-                <div class="row-between" style="margin-top:6px;">
+                <div class="stack" style="gap:4px;margin-top:6px;">
                   <div class="small"><strong>Früh (${patterns.wakeCompare.earlyCount}T):</strong> ${fmtMin(patterns.wakeCompare.earlyAvgMin)} <span class="xs muted">(${patterns.wakeCompare.earlyAvgQuote} %)</span></div>
                   <div class="small"><strong>Spät (${patterns.wakeCompare.lateCount}T):</strong> ${fmtMin(patterns.wakeCompare.lateAvgMin)} <span class="xs muted">(${patterns.wakeCompare.lateAvgQuote} %)</span></div>
                 </div>
@@ -278,18 +439,17 @@ export function renderStatsView(root, { toast } = {}) {
             </div>
 
             <div class="kpi-box">
-              <div class="kpi-label">Spätes Koffein (&ge; 15:00) vs. Aufwachzeit nächster Tag</div>
+              <div class="kpi-label">Spätes Koffein (&ge; 15:00) vs. Aufwachzeit</div>
               ${patterns.lateCaffeineWake.ready ? `
-                <div class="row-between" style="margin-top:6px;">
-                  <div class="small"><strong>Nach spätem Koffein (${patterns.lateCaffeineWake.withCount}T):</strong> Ø ${patterns.lateCaffeineWake.withAvgWake}</div>
+                <div class="stack" style="gap:4px;margin-top:6px;">
+                  <div class="small"><strong>Mit (&ge;15h, ${patterns.lateCaffeineWake.withCount}T):</strong> Ø ${patterns.lateCaffeineWake.withAvgWake}</div>
                   <div class="small"><strong>Ohne (${patterns.lateCaffeineWake.withoutCount}T):</strong> Ø ${patterns.lateCaffeineWake.withoutAvgWake}</div>
                 </div>
               ` : `<div class="xs muted" style="margin-top:4px;">Benötigt mind. je 2 Tage mit und ohne Koffein ab 15:00 Uhr.</div>`}
             </div>
-            <div class="xs soft">Hinweis: Zeigt statistische Zusammenhänge aus deinen Daten, keine Ursache.</div>
           </div>
-        </section>
-      </div>
+          <div class="xs soft" style="margin-top:8px;">Hinweis: Zeigt statistische Zusammenhänge aus deinen Daten, keine Ursache.</div>
+      </section>
 
       <!-- 3. Verlauf -->
       <section class="card">
@@ -427,6 +587,43 @@ export function renderStatsView(root, { toast } = {}) {
       historyRange = Number(btn.getAttribute('data-hr'));
       renderStatsView(root, { toast });
     });
+  });
+
+  root.querySelectorAll('[data-subj-days]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      subjectRangeDays = Number(btn.getAttribute('data-subj-days')) || 0;
+      renderStatsView(root, { toast });
+    });
+  });
+
+  root.querySelector('#btn-subj-uni')?.addEventListener('click', () => {
+    includeUniInSubject = !includeUniInSubject;
+    renderStatsView(root, { toast });
+  });
+
+  root.querySelectorAll('[data-anki-gm]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      ankiGraphMode = btn.getAttribute('data-anki-gm') || 'all';
+      renderStatsView(root, { toast });
+    });
+  });
+
+  root.querySelectorAll('[data-anki-lim]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      ankiGraphLimit = Number(btn.getAttribute('data-anki-lim')) || 0;
+      renderStatsView(root, { toast });
+    });
+  });
+
+  root.querySelector('#btn-apply-anki-pace')?.addEventListener('click', () => {
+    if (!ps) return;
+    if (ps.secNewReal >= 5) store.state.anki.secNew = ps.secNewReal;
+    if (ps.secLearnReal >= 5) store.state.anki.secLearn = ps.secLearnReal;
+    if (ps.secRevReal >= 5) store.state.anki.secReview = ps.secRevReal;
+    store.state.anki.updatedAt = Date.now();
+    store.save();
+    if (toast) toast('Echte Anki-Antwortzeiten als Schätzgewicht übernommen.', 'ok');
+    renderStatsView(root, { toast });
   });
 
   bindChartTooltips(root);

@@ -201,7 +201,7 @@ export function renderMoreView(root, ctx) {
           <div class="card-header">
             <h2 class="card-title">${icon('cloud', 15)} GitHub Gist Cloud-Sync (Win 11 ↔ Pixel 9a)</h2>
             <div class="row" style="gap:6px;">
-              <span class="pill">App v18</span>
+              <span class="pill">App v19</span>
               <span class="pill ${store.secrets.lastSyncStatus === 'ok' ? 'kit' : store.secrets.lastSyncStatus === 'err' ? 'danger' : ''}">
                 ${store.secrets.lastSyncAt ? `Sync ${toTimeStr(new Date(store.secrets.lastSyncAt))}` : 'Lokal'}
               </span>
@@ -271,6 +271,10 @@ export function renderMoreView(root, ctx) {
               <div class="field"><label><span class="anki-dot red"></span>Rot (Sek./Karte)</label><input type="number" id="s-anki-slearn" class="input mono" min="5" max="240" value="${store.state.anki.secLearn || 30}" /></div>
               <div class="field"><label><span class="anki-dot green"></span>Grün (Sek./Karte)</label><input type="number" id="s-anki-srev" class="input mono" min="5" max="240" value="${store.state.anki.secReview || 15}" /></div>
             </div>
+            <label class="row" style="cursor:pointer;margin-bottom:10px;">
+              <input type="checkbox" id="s-anki-autolog" ${store.state.anki.autoLogTime !== false ? 'checked' : ''} />
+              <span class="xs">Heutige echte Anki-Zeit beim Sync automatisch in Tagesring übernehmen</span>
+            </label>
             <div class="row">
               <button class="btn btn-primary btn-sm" id="btn-save-anki">Speichern</button>
               <button class="btn btn-sm" id="btn-test-anki">Testen</button>
@@ -757,6 +761,7 @@ export function renderMoreView(root, ctx) {
     store.state.anki.secNew = Math.max(5, Math.round(Number(root.querySelector('#s-anki-snew').value) || 45));
     store.state.anki.secLearn = Math.max(5, Math.round(Number(root.querySelector('#s-anki-slearn').value) || 30));
     store.state.anki.secReview = Math.max(5, Math.round(Number(root.querySelector('#s-anki-srev').value) || 15));
+    store.state.anki.autoLogTime = Boolean(root.querySelector('#s-anki-autolog')?.checked);
     store.state.anki.mode = mode;
     store.state.anki.updatedAt = Date.now();
     store.save();

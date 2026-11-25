@@ -1,6 +1,6 @@
 // Pure SVG interactive chart components (zero external dependencies, works 100% offline)
 
-import { fmtMin, fmtDateShort, minToTime, toTimeStr, timeToMin, escapeHtml } from './store.js';
+import { fmtMin, fmtDateShort, minToTime, toDateStr, toTimeStr, timeToMin, escapeHtml } from './store.js';
 
 export function renderDayTimelineSVG({ span, lectures = [], entries = [], caffeine = [] }) {
   if (!span) return '';
@@ -464,6 +464,114 @@ export function renderSimpleBarsSVG(items, { valueFormatter = (v) => String(v), 
           </g>
         `;
       }).join('')}
+    </svg>
+  `;
+}
+
+export function renderAnkiSyncChartSVG(points = [], { mode = 'all', compact = false } = {}) {
+  // points: [{ ts, b, r, g, tot, estMin }] oldest -> newest, 1 point per Anki sync
+  if (!Array.isArray(points) || points.length === 0) return '';
+  const W = 560;
+  const H = compact ? 150 : 196;
+  const padL = 36, padR = 14, padT = 16, padB = 30;
+  const plotW = W - padL - padR;
+  const plotH = H - padT - padB;
+  const n = points.length;
+
+  const showTotal = mode === 'all' || mode === 'total';
+  const showBRG = mode === 'all' || mode === 'brg';
+
+  let rawMax = 10;
+  for (const p of points) {
+    if (showTotal) rawMax = Math.max(rawMax, Number(p.tot) || 0);
+    if (showBRG) rawMax = Math.max(rawMax, Number(p.b) || 0, Number(p.r) || 0, Number(p.g) || 0);
+  }
+  const stepUnit = rawMax > 200 ? 50 : rawMax > 60 ? 20 : 10;
+  const yMax = Math.max(10, Math.ceil((rawMax * 1.08) / stepUnit) * stepUnit);
+
+  const xOf = (i) => (n === 1 ? padL + plotW / 2 : padL + (plotW * i) / (n - 1));
+  const yOf = (val) => padT + plotH - (Math.max(0, Number(val) || 0) / yMax) * plotH;
+  const poly = (getter) => points.map((p, i) => `${xOf(i).toFixed(1)},${yOf(getter(p)).toFixed(1)}`).join(' ');
+
+  const totalAreaPts = n >= 2 && showTotal
+    ? `${xOf(0).toFixed(1)},${(padT + plotH).toFixed(1)} ${poly((p) => p.tot)} ${xOf(n - 1).toFixed(1)},${(padT + plotH).toFixed(1)}`
+    : '';
+
+  // Day-change vertical dividers
+  const dayDividers = [];
+  for (let i = 1; i < n; i++) {
+    const prevD = toDateStr(new Date(points[i - 1].ts));
+    const curD = toDateStr(new Date(points[i].ts));
+    if (curD !== prevD) {
+      const mx = (xOf(i - 1) + xOf(i)) / 2;
+      dayDividers.push(`<line x1="${mx.toFixed(1)}" y1="${padT}" x2="${mx.toFixed(1)}" y2="${padT + plotH}" stroke="var(--border-strong)" stroke-dasharray="2 3" stroke-width="1" />`);
+    }
+  }
+
+  // Pick up to 5 evenly spaced X labels so timestamps never overlap
+  const maxLabels = compact ? 4 : 5;
+  const labelIdxSet = new Set([0, n - 1]);
+  if (n > 2) {
+    const innerCount = Math.min(n - 2, maxLabels - 2);
+    for (let k = 1; k <= innerCount; k++) {
+      labelIdxSet.add(Math.round((k * (n - 1)) / (innerCount + 1)));
+    }
+  }
+
+  let prevLabelDay = '';
+  const xLabelsHtml = Array.from(labelIdxSet).sort((a, b) => a - b).map((idx) => {
+    const dt = new Date(points[idx].ts);
+    const dStr = toDateStr(dt);
+    const shortD = fmtDateShort(dStr).slice(0, 5);
+    const tStr = toTimeStr(dt);
+    const labelTxt = dStr === prevLabelDay ? tStr : `${shortD} ${tStr}`;
+    prevLabelDay = dStr;
+    const anchor = n === 1 ? 'middle' : idx === 0 ? 'start' : idx === n - 1 ? 'end' : 'middle';
+    return `<text x="${xOf(idx).toFixed(1)}" y="${H - 7}" text-anchor="${anchor}" font-size="9.5" fill="var(--text-soft)" font-family="var(--mono)">${escapeHtml(labelTxt)}</text>`;
+  }).join('');
+
+  const dotR = n > 35 ? 2.3 : compact ? 2.8 : 3.3;
+  const hitSlotW = n === 1 ? plotW : Math.max(8, plotW / n);
+
+  const hitGroups = points.map((p, i) => {
+    const cx = xOf(i);
+    const dt = new Date(p.ts);
+    const dStr = fmtDateShort(toDateStr(dt));
+    const tStr = toTimeStr(dt);
+    const prev = i > 0 ? points[i - 1] : null;
+    const delta = prev ? (Number(p.tot) || 0) - (Number(prev.tot) || 0) : null;
+    const deltaTxt = delta !== null ? ` (${delta > 0 ? '+' : ''}${delta} seit letztem Sync)` : '';
+    const tip = `Sync ${dStr} ${tStr} · Gesamt: ${p.tot} Karten (~${p.estMin || 0} min)${deltaTxt} · Blau: ${p.b} · Rot: ${p.r} · Grün: ${p.g}`;
+
+    return `
+      <g class="bar-hit" data-tip="${escapeHtml(tip)}" style="cursor:pointer;">
+        <rect x="${(cx - hitSlotW / 2).toFixed(1)}" y="${padT}" width="${hitSlotW.toFixed(1)}" height="${plotH}" fill="transparent" />
+        ${showBRG ? `<circle cx="${cx.toFixed(1)}" cy="${yOf(p.g).toFixed(1)}" r="${dotR}" fill="var(--kit)" />` : ''}
+        ${showBRG ? `<circle cx="${cx.toFixed(1)}" cy="${yOf(p.b).toFixed(1)}" r="${dotR}" fill="var(--learn)" />` : ''}
+        ${showBRG ? `<circle cx="${cx.toFixed(1)}" cy="${yOf(p.r).toFixed(1)}" r="${dotR}" fill="var(--danger)" />` : ''}
+        ${showTotal ? `<circle cx="${cx.toFixed(1)}" cy="${yOf(p.tot).toFixed(1)}" r="${(dotR + 0.5).toFixed(1)}" fill="var(--anki)" stroke="var(--bg-elev)" stroke-width="1" />` : ''}
+      </g>
+    `;
+  }).join('');
+
+  return `
+    <svg viewBox="0 0 ${W} ${H}" aria-label="Anki Sync Verlauf">
+      ${[0, 0.5, 1].map((t) => {
+        const val = Math.round(yMax * t);
+        const y = yOf(val);
+        return `
+          <line x1="${padL}" y1="${y.toFixed(1)}" x2="${W - padR}" y2="${y.toFixed(1)}" stroke="var(--border)" stroke-dasharray="3 3" />
+          <text x="${padL - 6}" y="${(y + 3.5).toFixed(1)}" text-anchor="end" font-size="10" fill="var(--text-soft)" font-family="var(--mono)">${val}</text>
+        `;
+      }).join('')}
+      ${dayDividers.join('')}
+      ${totalAreaPts ? `<polygon fill="rgba(244, 114, 182, 0.09)" points="${totalAreaPts}" />` : ''}
+      ${n >= 2 && showBRG ? `<polyline fill="none" stroke="var(--kit)" stroke-width="1.9" stroke-linejoin="round" stroke-linecap="round" points="${poly((p) => p.g)}" />` : ''}
+      ${n >= 2 && showBRG ? `<polyline fill="none" stroke="var(--learn)" stroke-width="1.9" stroke-linejoin="round" stroke-linecap="round" points="${poly((p) => p.b)}" />` : ''}
+      ${n >= 2 && showBRG ? `<polyline fill="none" stroke="var(--danger)" stroke-width="1.9" stroke-linejoin="round" stroke-linecap="round" points="${poly((p) => p.r)}" />` : ''}
+      ${n >= 2 && showTotal ? `<polyline fill="none" stroke="var(--anki)" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" points="${poly((p) => p.tot)}" />` : ''}
+      ${hitGroups}
+      ${xLabelsHtml}
     </svg>
   `;
 }

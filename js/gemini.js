@@ -205,7 +205,9 @@ export function buildPlanningContext(weekOffset = 0) {
     },
     fachBalance: subjectBalance.map((s) => ({
       fach: s.subject,
-      bisherigeLernzeitMin: s.learnMin,
+      bisherigeLernzeitGesamtMin: s.learnMin,
+      davonLernenMin: s.focusMin,
+      davonAnkiMin: s.ankiMin,
       offenerRueckstandAnzahl: s.openBacklog,
       checklisteErledigt: `${s.chkDone}/${s.chkTotal}`,
       ankiOffen: s.ankiTotal
