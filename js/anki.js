@@ -86,7 +86,10 @@ export function syncDayAnkiFromRevlog(dStr = toDateStr(), { save = false } = {})
   }
 
   const totalMin = Math.round(totalSec / 60);
-  const existingIdx = store.state.e.findIndex((x) => x.d === dStr && x.k === 'a' && x.autoAnki === true);
+  const autoId = `anki_auto_${dStr}`;
+  const existingIdx = store.state.e.findIndex(
+    (x) => String(x.id) === autoId || (x.d === dStr && x.k === 'a' && x.autoAnki === true)
+  );
 
   // In 'sum' mode, avoid adding an autoAnki entry on top of an existing manual Anki entry on the same day
   if (store.state.mode === 'sum' && existingIdx < 0 && store.state.e.some((x) => x.d === dStr && x.k === 'a' && !x.autoAnki)) {
@@ -110,7 +113,7 @@ export function syncDayAnkiFromRevlog(dStr = toDateStr(), { save = false } = {})
       }
     } else {
       store.state.e.push({
-        id: Date.now() + Math.floor(Math.random() * 100),
+        id: autoId,
         d: dStr,
         t: toTimeStr(),
         m: totalMin,

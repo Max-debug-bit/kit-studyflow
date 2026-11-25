@@ -11,6 +11,7 @@ import {
   pad2,
   WEEKDAYS_DE,
   parseDateStr,
+  compareIds,
   escapeHtml as esc
 } from '../store.js';
 import {
@@ -79,10 +80,12 @@ export function renderTodayView(root, ctx) {
   reconcileBacklogStatus({ todayStr: today });
 
   // Sync today's attended live lectures automatically to Vorlesung/Produktiv (p) & real Anki revlog time to Anki (a)
+  let autoSynced = false;
   if (store.state.autoLogLectures) {
-    syncDayLecturesToProductive(today, { save: false });
+    if (syncDayLecturesToProductive(today, { save: false }).changed) autoSynced = true;
   }
-  syncDayAnkiFromRevlog(today, { save: false });
+  if (syncDayAnkiFromRevlog(today, { save: false }).changed) autoSynced = true;
+  if (autoSynced) store.save({ silent: true });
 
   const day = store.getDayBreakdown(today);
   const isRest = store.isRestDay(today);
@@ -134,7 +137,7 @@ export function renderTodayView(root, ctx) {
   const missingWakes = wake14.filter((x) => !x.w).length;
 
   const recentEntries = [...store.state.e]
-    .sort((a, b) => (b.d + (b.t || '')).localeCompare(a.d + (a.t || '')) || b.id - a.id)
+    .sort((a, b) => (b.d + (b.t || '')).localeCompare(a.d + (a.t || '')) || compareIds(b.id, a.id))
     .slice(0, 30);
   const countingByDate = {};
   for (const x of recentEntries) {
@@ -142,7 +145,7 @@ export function renderTodayView(root, ctx) {
   }
 
   const recentCaf = [...store.state.cf]
-    .sort((a, b) => (b.d + (b.t || '')).localeCompare(a.d + (a.t || '')) || b.id - a.id)
+    .sort((a, b) => (b.d + (b.t || '')).localeCompare(a.d + (a.t || '')) || compareIds(b.id, a.id))
     .slice(0, 20);
 
   const timerProj = timerStatus ? renderTimerProjectionSVG(live, timerStatus) : null;
@@ -635,7 +638,7 @@ export function renderTodayView(root, ctx) {
                 ${recentCaf.map((c) => `
                   <div class="entry-row" style="padding:6px 10px;">
                     <span class="small mono"><strong>${c.mg} mg</strong> · ${fmtDateShort(c.d)} ${esc(c.t)}</span>
-                    <button class="btn btn-xs btn-ghost" data-del-caf="${c.id}">${icon('x', 12)}</button>
+                    <button class="btn btn-xs btn-ghost" data-del-caf="${esc(c.id)}">${icon('x', 12)}</button>
                   </div>
                 `).join('') || '<div class="xs muted">Keine Einträge.</div>'}
               </div>
@@ -702,7 +705,7 @@ export function renderTodayView(root, ctx) {
                     ${x.note ? `<span class="xs muted">${esc(x.note)}</span>` : ''}
                     ${!counts ? '<span class="xs soft">(zählt nicht)</span>' : ''}
                   </div>
-                  <button class="btn btn-xs btn-ghost" data-del-entry="${x.id}" title="Löschen">${icon('x', 13)}</button>
+                  <button class="btn btn-xs btn-ghost" data-del-entry="${esc(x.id)}" title="Löschen">${icon('x', 13)}</button>
                 </div>
               `;
             }).join('') || '<div class="small muted">Noch keine Einträge vorhanden.</div>'}
@@ -1048,7 +1051,7 @@ export function renderTodayView(root, ctx) {
   });
 
   root.querySelectorAll('[data-del-caf]').forEach((btn) => {
-    btn.addEventListener('click', () => { store.deleteCaffeine(Number(btn.getAttribute('data-del-caf'))); toast('Koffein gelöscht.', '', { undo: true }); });
+    btn.addEventListener('click', () => { store.deleteCaffeine(btn.getAttribute('data-del-caf')); toast('Koffein gelöscht.', '', { undo: true }); });
   });
 
   // Wake / Sleep
@@ -1081,7 +1084,7 @@ export function renderTodayView(root, ctx) {
   });
 
   root.querySelectorAll('[data-del-entry]').forEach((btn) => {
-    btn.addEventListener('click', () => { store.deleteEntry(Number(btn.getAttribute('data-del-entry'))); toast('Eintrag gelöscht.', '', { undo: true }); });
+    btn.addEventListener('click', () => { store.deleteEntry(btn.getAttribute('data-del-entry')); toast('Eintrag gelöscht.', '', { undo: true }); });
   });
 
   // Timer controls

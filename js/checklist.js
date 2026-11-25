@@ -731,21 +731,25 @@ export function syncDayLecturesToProductive(dStr = toDateStr(), { save = true } 
   const totalMin = attended.reduce((s, l) => s + l.durationMin, 0);
   const lastEnd = attended.length ? attended[attended.length - 1].end : toTimeStr();
 
-  const existingIdx = store.state.e.findIndex((x) => x.d === dStr && x.k === 'p' && x.autoLecture === true);
+  const autoId = `lec_${dStr}`;
+  const existingIdx = store.state.e.findIndex(
+    (x) => String(x.id) === autoId || (x.d === dStr && x.k === 'p' && x.autoLecture === true)
+  );
 
   let changed = false;
   if (totalMin > 0) {
     if (existingIdx >= 0) {
-      if (store.state.e[existingIdx].m !== totalMin) {
-        store.state.e[existingIdx].m = totalMin;
-        store.state.e[existingIdx].t = lastEnd;
-        store.state.e[existingIdx].lectureCount = attended.length;
-        store.state.e[existingIdx].updatedAt = Date.now();
+      const cur = store.state.e[existingIdx];
+      if (cur.m !== totalMin || cur.t !== lastEnd || cur.lectureCount !== attended.length) {
+        cur.m = totalMin;
+        cur.t = lastEnd;
+        cur.lectureCount = attended.length;
+        cur.updatedAt = Date.now();
         changed = true;
       }
     } else {
       store.state.e.push({
-        id: Date.now() + Math.floor(Math.random() * 100),
+        id: autoId,
         d: dStr,
         t: lastEnd,
         m: totalMin,
@@ -759,13 +763,15 @@ export function syncDayLecturesToProductive(dStr = toDateStr(), { save = true } 
   } else if (existingIdx >= 0) {
     const [removed] = store.state.e.splice(existingIdx, 1);
     if (removed && removed.id !== undefined) {
-      if (!store.state.deletedIds) store.state.deletedIds = {};
-      store.state.deletedIds[String(removed.id)] = Date.now();
+      store.markDeleted(removed.id);
     }
     changed = true;
   }
 
-  if (changed && save) store.save();
+  if (changed) {
+    store.invalidateCaches();
+    if (save) store.save();
+  }
   return { changed, minutes: totalMin, count: attended.length };
 }
 
@@ -851,7 +857,7 @@ export function getAttendedUniMinutesBySubject({ days = 0, todayStr = toDateStr(
 
 // ---------- Text-Plan Parser & Exporter ----------
 
-export function parseTextChecklistPlan(rawText, referenceYear = new Date().getFullYear()) {
+export function parseTextChecklistPlan(rawText, referenceYear = new Date().getFullYear(), referenceMonth = new Date().getMonth() + 1) {
   const lines = (rawText || '').replace(/\r\n/g, '\n').split('\n').map((l) => l.trim()).filter(Boolean);
   let currentDate = null;
   let inReminders = false;
@@ -877,9 +883,16 @@ export function parseTextChecklistPlan(rawText, referenceYear = new Date().getFu
       inReminders = false;
       const dayNum = Number(dateMatch[1]);
       const monthNum = Number(dateMatch[2]);
-      const yearNum = dateMatch[3]
-        ? (dateMatch[3].length === 2 ? 2000 + Number(dateMatch[3]) : Number(dateMatch[3]))
-        : referenceYear;
+      let yearNum;
+      if (dateMatch[3]) {
+        yearNum = dateMatch[3].length === 2 ? 2000 + Number(dateMatch[3]) : Number(dateMatch[3]);
+      } else if (referenceMonth === 12 && monthNum === 1) {
+        yearNum = referenceYear + 1;
+      } else if (referenceMonth === 1 && monthNum === 12) {
+        yearNum = referenceYear - 1;
+      } else {
+        yearNum = referenceYear;
+      }
       currentDate = `${yearNum}-${pad2(monthNum)}-${pad2(dayNum)}`;
 
       const pipeIdx = line.indexOf('|');
@@ -914,8 +927,8 @@ export function parseTextChecklistPlan(rawText, referenceYear = new Date().getFu
   return { items, dayNotes, reminders };
 }
 
-export function applyParsedChecklist({ items, dayNotes, reminders, replaceDates = [] }) {
-  store.pushUndo('Plan übernommen');
+export function applyParsedChecklist({ items, dayNotes, reminders, replaceDates = [] }, { save = true, skipUndo = false } = {}) {
+  if (!skipUndo) store.pushUndo('Plan übernommen');
   const todayStr = toDateStr();
   const replaceSet = new Set(replaceDates);
 
@@ -1007,7 +1020,7 @@ export function applyParsedChecklist({ items, dayNotes, reminders, replaceDates 
   }
 
   reconcileBacklogStatus({ todayStr });
-  store.save();
+  if (save) store.save();
   return { addedItems, addedReminders };
 }
 

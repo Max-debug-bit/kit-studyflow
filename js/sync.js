@@ -404,11 +404,25 @@ export function mergeStates(localRaw, remoteRaw) {
   // Keep whichever ICS is fresher
   const useRemoteIcs = (remote.icsUpdatedAt || 0) >= (local.icsUpdatedAt || 0);
 
+  const mergedE = mergeByIdAppend(primary.e, secondary.e);
+  const mergedEIds = new Set(mergedE.map((x) => String(x.id)));
+
+  // Dedicated multi-device timer merge by tmUpdatedAt + anti-resurrection guard if timerRunId was already saved
+  const lTmTs = Math.max(local.tmUpdatedAt || 0, local.tm?.startedAt || 0);
+  const rTmTs = Math.max(remote.tmUpdatedAt || 0, remote.tm?.startedAt || 0);
+  let mergedTm = rTmTs > lTmTs ? remote.tm : lTmTs > rTmTs ? local.tm : primary.tm;
+  if (mergedTm?.timerRunId && (mergedEIds.has(String(mergedTm.timerRunId)) || isDeleted(mergedTm.timerRunId, mergedTm.startedAt || 0))) {
+    mergedTm = null;
+  }
+  const mergedTmUpdatedAt = Math.max(lTmTs, rTmTs);
+
   const result = {
     ...primary,
     schemaVersion: Math.max(local.schemaVersion || 2, remote.schemaVersion || 2, 2),
-    e: mergeByIdAppend(primary.e, secondary.e),
+    e: mergedE,
     cf: mergeByIdAppend(primary.cf, secondary.cf),
+    tm: mergedTm || null,
+    tmUpdatedAt: mergedTmUpdatedAt,
     w: mergeTimestampedMap('w'),
     sx: mergeTimestampedMap('sx'),
     lectureAttendance: mergeTimestampedMap('lectureAttendance'),
@@ -705,10 +719,10 @@ export async function pullFromGist({ preferRemote = false, fromBackgroundSync = 
         store.state = merged;
         store.invalidateCaches();
         reconcileBacklogStatus();
-        if (store.state.autoLogLectures) syncDayLecturesToProductive(toDateStr(), { save: false });
+        const lecRes = store.state.autoLogLectures ? syncDayLecturesToProductive(toDateStr(), { save: false }) : { changed: false };
         const afterSig = canonicalSyncSig(store.state);
-        updatedState = afterSig !== localBeforeSig;
-        needsPushBack = afterSig !== remoteSig;
+        updatedState = afterSig !== localBeforeSig || Boolean(lecRes?.changed);
+        needsPushBack = afterSig !== remoteSig || Boolean(lecRes?.changed);
         if (updatedState) {
           store.save({ skipSync: true, preserveTimestamp: true, fromBackgroundSync });
         }

@@ -21,20 +21,20 @@ import {
   applyParsedChecklist,
   parseTextChecklistPlan,
   getDayLectures,
-  reconcileBacklogStatus
+  reconcileBacklogStatus,
+  estimateChecklistItemMinutes
 } from './checklist.js';
 
 export const AVAILABLE_MODELS = [
-  { id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash (Empfohlen · Free Tier)' },
-  { id: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash (Schnell · Free Tier)' },
-  { id: 'gemini-3.5-flash-lite', label: 'Gemini 3.5 Flash Lite (Ultra-schnell)' },
-  { id: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash (Stabil · Free Tier)' },
+  { id: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash (Empfohlen · Free Tier)' },
+  { id: 'gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash Lite (Schnell · Free Tier)' },
+  { id: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro (Starkes Reasoning)' },
   { id: 'gemini-flash-latest', label: 'Gemini Flash Latest (Auto)' },
-  { id: 'gemini-pro-latest', label: 'Gemini Pro Latest (Starkes Reasoning)' },
+  { id: 'gemini-pro-latest', label: 'Gemini Pro Latest (Auto)' },
   { id: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro Preview' }
 ];
 
-const FALLBACK_CHAIN = ['gemini-3.8-flash', 'gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-2.5-flash', 'gemini-flash-latest', 'gemini-pro-latest'];
+const FALLBACK_CHAIN = ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-flash-latest', 'gemini-2.5-pro', 'gemini-pro-latest'];
 const deadModelsSession = new Set();
 
 function extractAllJsonBlocks(text) {
@@ -89,7 +89,9 @@ export function buildPlanningContext(weekOffset = 0) {
   const todayAnkiRemainingMin = ankiDoneToday
     ? 0
     : (anki.totalDue > 0
-        ? Math.max(0, Math.min(minDailyAnki, anki.estMinutes) - todayBreak.a)
+        ? (ankiSyncedToday
+            ? Math.min(anki.estMinutes, Math.max(0, minDailyAnki - todayBreak.a))
+            : Math.max(0, Math.min(minDailyAnki, anki.estMinutes) - todayBreak.a))
         : (todayBreak.a > 0 || ankiSyncedToday ? 0 : minDailyAnki));
 
   const prefs = store.state.planningPrefs || {};
@@ -132,7 +134,8 @@ export function buildPlanningContext(weekOffset = 0) {
         createsAnki: l.createsAnki,
         triggersHomework: l.triggersHomework,
         homeworkMode: l.triggersHomework ? l.homeworkMode : null,
-        location: l.location || ''
+        location: l.location || '',
+        ...(d === todayStr ? { bereitsVorbei: Boolean(l.endedToday) } : {})
       });
     }
   }
@@ -157,6 +160,7 @@ export function buildPlanningContext(weekOffset = 0) {
       eingeplantAm: b.scheduledDate
     }));
 
+  const calCatalog = store.getCalibratedTaskCatalog();
   const currentChecklist = (store.state.checklist || [])
     .filter((c) => c.d >= mondayStr && c.d <= sundayStr)
     .map((c) => ({
@@ -164,6 +168,7 @@ export function buildPlanningContext(weekOffset = 0) {
       timeLabel: c.timeLabel,
       title: c.title,
       kind: c.kind,
+      estMin: estimateChecklistItemMinutes(c, calCatalog),
       done: c.done,
       ...(c.backlogId ? { backlogId: c.backlogId } : {})
     }));
@@ -234,7 +239,7 @@ export function buildPlanningContext(weekOffset = 0) {
       planungsRegel: 'Tägliche Anki-Reviews werden NICHT als normale Todo-Punkte in items geplant. Wichtig: Der Student macht NICHT zwingend jeden Tag ALLE fälligen Karten! Wenn ankiFuerHeuteAbgehakt === true, sind heute 0 Min. Anki mehr offen (egal wie viele Karten noch in Anki liegen). Sonst ein realistisches Tagespensum im Budget reservieren (orientiert an taeglicherZeitpufferFolgetageMin bzw. alleFaelligenKartenMin wenn kleiner).'
     },
     modulRegeln: moduleRules,
-    aufgabenKatalog: store.getCalibratedTaskCatalog().map((c) => ({
+    aufgabenKatalog: calCatalog.map((c) => ({
       catalogId: c.id,
       fach: c.subject,
       titel: c.title,
@@ -263,7 +268,7 @@ Halte dich strikt an diese 7 Regeln und nutze jedes Feld aus dem JSON-Kontext ge
 
 2. ENERGIE-MODUS, BELASTUNGS-SCHUTZ & WEICHER RHYTHMUS (fokusStatistik, energieModus & weicheRhythmusOrientierung):
    - "tageszielMindestMin" ist ein tägliches MINDESTZIEL (Streak), KEIN Tagesmaximum! Ein 110–150-Min.-Video ist völlig normal und erwünscht.
-   - Passe das Tagespensum an Uni-Last, "heuteSchonGelerntMin" und "energieModus" an:
+   - Passe das Tagespensum an Uni-Last, "heuteSchonGelerntMin" (enthält "heuteAnkiMin" bereits — NICHT doppelt addieren!) und "energieModus" an:
      * "reset": leicht (~1,5–3 h), niedrige Einstiegshürde, passiv vor aktiv, viel Puffer.
      * "normal": stabiler KIT-Rhythmus (~2,5–4,5 h an freien Tagen, ~1–2,5 h an vollen Uni-Tagen).
      * "fokus": hohes Pensum (~4–6 h an freien Tagen, ~2–3,5 h an Uni-Tagen).
@@ -478,7 +483,7 @@ export function buildAuditInstruction() {
 
 ---
 SPEZIAL-MODUS: STRENGER KONTROLLEUR (PLAN-AUDIT)
-Prüfe "aktuelleCheckliste" zusammen mit "uniTermineDieseWoche", "offenerRueckstand", "tagesRhythmus", "ankiStatus" und "lernHistorieFuerKI" mit kritischem Blick:
+Prüfe "aktuelleCheckliste" (inkl. "estMin") zusammen mit "uniTermineDieseWoche", "offenerRueckstand", "tagesRhythmus", "ankiStatus" und "lernHistorieFuerKI" mit kritischem Blick:
 1. Harte Fehler: Überschneidungen mit Live-Uni-Terminen, Zeitfenster auf "heute" vor "aktuelleUhrzeit", Start vor "fruehesterLernstartFreieTage", oder vergessene offene/überfällige Rückstände.
 2. Überlastungs-Fallen: Wurde das tägliche Anki-Zeitbudget (heute: "heuteNochOffenBerechnetMin", Folgetage: "taeglicherZeitpufferFolgetageMin") im Tagesbudget mitgedacht (ohne eigene Anki-Review-Todos in "items" zu erzeugen)? Tage mit zu vielen schweren Nacharbeiten auf einmal, fehlende Pausen bei langen Uni-Tagen, verplanter Sonntag (falls "sonntagFreiAusserAnki" true), oder unrealistische Zeiten im Vergleich zu "echteP75ZeitenProFach".
 3. Formuliere zuerst maximal 5 knappe, direkte Kritikpunkte (ohne Emojis, klar nummeriert).
@@ -513,13 +518,18 @@ export async function runPlanAudit(weekOffset = 0) {
     }]
   }];
 
-  const preferred = store.state.ai.model || 'gemini-3.8-flash';
+  const preferred = store.state.ai.model || 'gemini-2.5-flash';
   const result = await callGeminiWithFallback({ apiKey, preferred, contents, systemInstruction: sys });
   const proposal = extractProposalFromReply(result.text);
+  let displayText = stripJsonBlock(result.text) || (proposal ? proposal.summary : result.text);
+  if (result.truncated && !proposal) {
+    displayText += '\n\n[Hinweis: Die KI-Antwort wurde bei MAX_TOKENS abgeschnitten — der JSON-Planblock war unvollständig. Bitte erneut versuchen oder kürzer anfragen.]';
+  }
   return {
     rawText: result.text,
-    displayText: stripJsonBlock(result.text) || (proposal ? proposal.summary : result.text),
+    displayText,
     proposal,
+    truncated: Boolean(result.truncated),
     modelUsed: result.modelUsed,
     usedFallback: result.modelUsed !== preferred
   };
@@ -603,7 +613,7 @@ export async function runWeeklyReview(weekOffset = 0) {
     parts: [{ text: `Wochendaten:\n${JSON.stringify(ctx)}\n\nErstelle meinen kompakten Wochenrückblick und lass uns meinen Rhythmus für nächste Woche gemeinsam verfeinern.` }]
   }];
 
-  const preferred = store.state.ai.model || 'gemini-3.8-flash';
+  const preferred = store.state.ai.model || 'gemini-2.5-flash';
   const result = await callGeminiWithFallback({ apiKey, preferred, contents, systemInstruction: sys });
   const suggestedRhythm = extractRhythmSuggestion(result.text);
   return {
@@ -751,7 +761,7 @@ Bitte lies alle erkennbaren Termine (Vorlesung vs. Übung vs. Ausfall sowie Work
     ]
   }];
 
-  const preferred = store.state.ai.model || 'gemini-3.8-flash';
+  const preferred = store.state.ai.model || 'gemini-2.5-flash';
   const result = await callGeminiWithFallback({ apiKey, preferred, contents, systemInstruction: sys });
   return parseSemesterScanReply(result.text, result.modelUsed);
 }
@@ -789,7 +799,7 @@ async function callGeminiModel({ apiKey, model, contents, systemInstruction }) {
       body: JSON.stringify({
         system_instruction: { parts: [{ text: systemInstruction }] },
         contents,
-        generationConfig: { temperature: 0.45 }
+        generationConfig: { temperature: 0.45, maxOutputTokens: 8192 }
       })
     });
   } catch (err) {
@@ -816,9 +826,15 @@ async function callGeminiModel({ apiKey, model, contents, systemInstruction }) {
   }
 
   const data = await res.json();
-  const text = data?.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || '';
+  const cand = data?.candidates?.[0];
+  const parts = Array.isArray(cand?.content?.parts) ? cand.content.parts : [];
+  const text = parts
+    .filter((p) => !p?.thought && typeof p?.text === 'string')
+    .map((p) => p.text)
+    .join('');
   if (!text) throw new Error('Leere Antwort von Gemini erhalten.');
-  return { text, modelUsed: model };
+  const finishReason = cand?.finishReason || '';
+  return { text, modelUsed: model, finishReason, truncated: finishReason === 'MAX_TOKENS' };
 }
 
 async function callGeminiWithFallback({ apiKey, preferred, contents, systemInstruction }) {
@@ -896,19 +912,24 @@ export async function sendPlannerMessage(userText, weekOffset = 0) {
   const currentUserPayload = `Aktueller Kontext:\n${JSON.stringify(ctx)}\n\nNachricht:\n${userText}`;
   const contents = [...recentHistory, { role: 'user', parts: [{ text: currentUserPayload }] }];
 
-  const preferred = store.state.ai.model || 'gemini-3.8-flash';
+  const preferred = store.state.ai.model || 'gemini-2.5-flash';
   const result = await callGeminiWithFallback({ apiKey, preferred, contents, systemInstruction: sys });
   const proposal = extractProposalFromReply(result.text);
+  let displayText = stripJsonBlock(result.text) || (proposal ? proposal.summary : result.text);
+  if (result.truncated && !proposal) {
+    displayText += '\n\n[Hinweis: Die KI-Antwort wurde bei MAX_TOKENS abgeschnitten — der JSON-Planblock war unvollständig. Bitte erneut versuchen oder kürzer anfragen.]';
+  }
   return {
     rawText: result.text,
-    displayText: stripJsonBlock(result.text) || (proposal ? proposal.summary : result.text),
+    displayText,
     proposal,
+    truncated: Boolean(result.truncated),
     modelUsed: result.modelUsed,
     usedFallback: result.modelUsed !== preferred
   };
 }
 
-export async function testGeminiConnection(apiKey, model = 'gemini-3.8-flash') {
+export async function testGeminiConnection(apiKey, model = 'gemini-2.5-flash') {
   const res = await callGeminiWithFallback({
     apiKey: (apiKey || '').replace(/\s+/g, ''),
     preferred: model,
@@ -918,8 +939,9 @@ export async function testGeminiConnection(apiKey, model = 'gemini-3.8-flash') {
   return { ok: true, modelUsed: res.modelUsed, reply: res.text.trim() };
 }
 
-export function applyProposalToWeek(proposal) {
+export function applyProposalToWeek(proposal, { onAfterMutate = null } = {}) {
   if (!proposal) return { addedItems: 0, addedReminders: 0, addedCatalog: 0, appliedRhythm: false };
+  store.pushUndo('KI-Plan übernommen');
   let addedItems = 0;
   let addedReminders = 0;
   if ((proposal.items && proposal.items.length) || (proposal.reminders && proposal.reminders.length) || (proposal.replaceDates && proposal.replaceDates.length)) {
@@ -928,19 +950,19 @@ export function applyProposalToWeek(proposal) {
       dayNotes: proposal.dayNotes || {},
       reminders: proposal.reminders || [],
       replaceDates: proposal.replaceDates || []
-    });
+    }, { save: false, skipUndo: true });
     addedItems = r.addedItems;
     addedReminders = r.addedReminders;
   }
   const addedCatalog = Array.isArray(proposal.newCatalogItems) && proposal.newCatalogItems.length
-    ? store.addCatalogItemsFromAi(proposal.newCatalogItems)
+    ? store.addCatalogItemsFromAi(proposal.newCatalogItems, { save: false })
     : 0;
   let appliedRhythm = false;
   if (proposal.suggestedRhythm) {
-    store.pushUndo('Rhythmus-Orientierung aktualisiert');
     store.state.ai.rhythmNotes = proposal.suggestedRhythm;
-    store.save();
     appliedRhythm = true;
   }
+  if (typeof onAfterMutate === 'function') onAfterMutate();
+  store.save();
   return { addedItems, addedReminders, addedCatalog, appliedRhythm };
 }

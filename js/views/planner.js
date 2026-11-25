@@ -88,7 +88,7 @@ export function renderPlannerView(root, { toast, navigate }) {
     <div class="page-header">
       <div>
         <h1 class="page-title">KI-Planer</h1>
-        <div class="small muted">Woche ${fmtDateShort(monday)}–${fmtDateShort(sunday)} · Stand ${toTimeStr()} · ${esc(store.state.ai.model || 'gemini-3.8-flash')}</div>
+        <div class="small muted">Woche ${fmtDateShort(monday)}–${fmtDateShort(sunday)} · Stand ${toTimeStr()} · ${esc(store.state.ai.model || 'gemini-2.5-flash')}</div>
       </div>
       <div class="row">
         <div class="segmented" title="Energie-Modus für die KI-Planung">
@@ -250,9 +250,9 @@ export function renderPlannerView(root, { toast, navigate }) {
       const idx = Number(btn.getAttribute('data-apply-prop'));
       const msg = store.state.ai.chat[idx];
       if (msg?.proposal) {
-        const res = applyProposalToWeek(msg.proposal);
-        msg.applied = true;
-        store.save();
+        const res = applyProposalToWeek(msg.proposal, {
+          onAfterMutate: () => { msg.applied = true; }
+        });
         const parts = [];
         if (res.addedItems) parts.push(`${res.addedItems} Punkte`);
         if (res.addedReminders) parts.push(`${res.addedReminders} Vormerkungen`);

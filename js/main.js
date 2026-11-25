@@ -64,11 +64,61 @@ function isUserActivelyEditing() {
   return Boolean(active && active.matches && active.matches('input, textarea, select'));
 }
 
+function captureViewDrafts() {
+  const fields = new Map();
+  viewRoot.querySelectorAll('input[id], textarea[id]').forEach((el) => {
+    const t = (el.type || '').toLowerCase();
+    if (['checkbox', 'radio', 'file', 'hidden', 'submit', 'button'].includes(t)) return;
+    if (el.value !== el.defaultValue) {
+      fields.set(el.id, el.value);
+    }
+  });
+  const openDetailsById = new Set();
+  const openDetailsByIdx = new Set();
+  viewRoot.querySelectorAll('details').forEach((d, idx) => {
+    if (!d.open) return;
+    if (d.id) openDetailsById.add(d.id);
+    else openDetailsByIdx.add(idx);
+  });
+  const activeEl = document.activeElement;
+  const activeId = (activeEl && viewRoot.contains(activeEl) && activeEl.id) ? activeEl.id : '';
+  let selStart = null;
+  let selEnd = null;
+  if (activeId && typeof activeEl.selectionStart === 'number') {
+    selStart = activeEl.selectionStart;
+    selEnd = activeEl.selectionEnd;
+  }
+  return { fields, openDetailsById, openDetailsByIdx, activeId, selStart, selEnd };
+}
+
+function restoreViewDrafts(snap) {
+  if (!snap) return;
+  snap.fields.forEach((val, id) => {
+    const el = document.getElementById(id);
+    if (el && viewRoot.contains(el)) el.value = val;
+  });
+  viewRoot.querySelectorAll('details').forEach((d, idx) => {
+    if (d.id ? snap.openDetailsById.has(d.id) : snap.openDetailsByIdx.has(idx)) {
+      d.open = true;
+    }
+  });
+  if (snap.activeId && document.hasFocus()) {
+    const el = document.getElementById(snap.activeId);
+    if (el && viewRoot.contains(el) && typeof el.focus === 'function') {
+      el.focus({ preventScroll: true });
+      if (snap.selStart !== null && typeof el.setSelectionRange === 'function') {
+        try { el.setSelectionRange(snap.selStart, snap.selEnd); } catch { /* ignore */ }
+      }
+    }
+  }
+}
+
 function flushDeferredRenderIfReady() {
   if (!deferredRender) return;
+  if (document.visibilityState === 'hidden' || !document.hasFocus()) return;
   if (isUserActivelyEditing()) return;
   deferredRender = false;
-  renderCurrentView();
+  renderCurrentView({ preserveDrafts: true });
 }
 
 function openModal(html, onBind) {
@@ -394,7 +444,7 @@ function promptLogFromChecklist(item) {
 
 // ---------- Pairing Handler (#pair=...) for Pixel 9a (#8) ----------
 
-async function applyPairingObject(obj) {
+async function applyPairingObject(obj, { preferRemote = true, syncAfter = true } = {}) {
   if (!obj || typeof obj !== 'object') throw new Error('Ungültige Kopplungsdaten.');
   if (obj.gt) store.secrets.githubToken = String(obj.gt).replace(/\s+/g, '');
   if (obj.gid) store.secrets.gistId = String(obj.gid).trim();
@@ -405,9 +455,8 @@ async function applyPairingObject(obj) {
     store.save({ skipSync: true, preserveTimestamp: true });
   }
   toast('Gerät gekoppelt! Lade Cloud-Daten...', 'ok');
-  if (store.secrets.githubToken && store.secrets.gistId) {
-    const isFreshDevice = store.state.e.length === 0 && (store.state.checklist || []).length === 0;
-    const res = await pullFromGist({ preferRemote: isFreshDevice });
+  if (syncAfter && store.secrets.githubToken && store.secrets.gistId) {
+    const res = await pullFromGist({ preferRemote });
     if (res.ok) {
       const s = res.summary || store.secrets.lastRemoteSummary;
       toast(s ? `Gekoppelt! Geladen: ${s.chk} Todos · ${s.anki} Ankis` : 'Cloud-Sync auf diesem Gerät aktiv!', 'ok');
@@ -417,10 +466,91 @@ async function applyPairingObject(obj) {
   }
 }
 
+function confirmAndApplyPairing(obj, { isPinProtected = false } = {}) {
+  if (!obj || typeof obj !== 'object' || (!obj.gt && !obj.gid && !obj.ak)) {
+    toast('Ungültige Kopplungsdaten.', 'err');
+    return;
+  }
+  const hasExistingCreds = Boolean(store.secrets.githubToken || store.secrets.gistId);
+  const isFreshDevice = store.state.e.length === 0 && (store.state.checklist || []).length === 0;
+  const gidRaw = String(obj.gid || '').trim();
+  const gidShort = gidRaw ? `${gidRaw.slice(0, 8)}…${gidRaw.slice(-4)}` : '—';
+  const sameGist = Boolean(gidRaw && store.secrets.gistId && gidRaw === store.secrets.gistId);
+  const includesKey = Boolean(obj.ak);
+
+  openModal(`
+    <div class="card-header">
+      <h3 class="card-title">Gerät wirklich koppeln?</h3>
+      <button class="icon-btn" id="pair-confirm-close">${icon('x', 15)}</button>
+    </div>
+    <p class="xs muted" style="margin-top:0;">
+      Prüfe kurz, ob dieser Kopplungs-Code wirklich von deinem eigenen Gerät stammt (${isPinProtected ? 'PIN-entsperrt' : 'unverschlüsselter Code'}):
+    </p>
+    <div class="stack-sm xs" style="padding:10px 12px;border-radius:10px;background:var(--bg-elev);border:1px solid var(--border);margin-bottom:12px;">
+      <div class="row-between">
+        <span class="muted">Ziel-Gist-ID</span>
+        <span class="mono" style="font-weight:600;">${escapeHtml(gidShort)}</span>
+      </div>
+      <div class="row-between">
+        <span class="muted">GitHub-Token enthalten</span>
+        <span>${obj.gt ? 'Ja' : 'Nein'}</span>
+      </div>
+      <div class="row-between">
+        <span class="muted">Gemini API-Key enthalten</span>
+        <span>${includesKey ? 'Ja' : 'Nein'}</span>
+      </div>
+    </div>
+    ${hasExistingCreds ? `
+      <div class="xs" style="padding:9px 11px;border-radius:10px;background:rgba(248,113,113,.12);border:1px solid rgba(248,113,113,.35);color:var(--danger);margin-bottom:12px;">
+        <strong>Achtung:</strong> Auf diesem Gerät ist bereits ein GitHub-Gist konfiguriert${sameGist ? ' (gleiche Gist-ID)' : ' (<strong>andere Gist-ID!</strong>)'}. Durch Bestätigen werden die gespeicherten Zugangsdaten ersetzt.
+      </div>
+    ` : ''}
+    ${!isFreshDevice ? `
+      <p class="xs muted" style="margin-top:0;margin-bottom:12px;">
+        Auf diesem Gerät liegen bereits lokale Daten (${store.state.e.length} Zeit-Einträge, ${(store.state.checklist || []).length} Todos). Wähle aus, wie die Cloud-Daten geladen werden sollen:
+      </p>
+      <div class="row" style="justify-content:flex-end;gap:8px;flex-wrap:wrap;">
+        <button type="button" class="btn btn-sm" id="pair-cancel">Abbrechen</button>
+        <button type="button" class="btn btn-sm" id="pair-merge">Zusammenführen & syncen</button>
+        <button type="button" class="btn btn-primary btn-sm" id="pair-remote">Cloud laden (lokal ersetzen)</button>
+      </div>
+    ` : `
+      <div class="row" style="justify-content:flex-end;gap:8px;flex-wrap:wrap;">
+        <button type="button" class="btn btn-sm" id="pair-cancel">Abbrechen</button>
+        <button type="button" class="btn btn-primary btn-sm" id="pair-remote">Bestätigen & Cloud laden</button>
+      </div>
+    `}
+  `, (modalEl) => {
+    modalEl.querySelector('#pair-confirm-close')?.addEventListener('click', closeModal);
+    modalEl.querySelector('#pair-cancel')?.addEventListener('click', () => {
+      closeModal();
+      toast('Kopplung abgebrochen.');
+    });
+    modalEl.querySelector('#pair-remote')?.addEventListener('click', async () => {
+      closeModal();
+      try {
+        await applyPairingObject(obj, { preferRemote: true, syncAfter: true });
+      } catch (err) {
+        toast(err.message, 'err');
+      }
+    });
+    modalEl.querySelector('#pair-merge')?.addEventListener('click', async () => {
+      closeModal();
+      try {
+        await applyPairingObject(obj, { preferRemote: false, syncAfter: true });
+      } catch (err) {
+        toast(err.message, 'err');
+      }
+    });
+  });
+}
+
 function handlePairingCodeFlow(code) {
   const needPin = isPinProtectedPairingCode(code);
   if (!needPin) {
-    decodePairingCode(code).then(applyPairingObject).catch((err) => toast(err.message, 'err'));
+    decodePairingCode(code)
+      .then((obj) => confirmAndApplyPairing(obj, { isPinProtected: false }))
+      .catch((err) => toast(err.message, 'err'));
     return;
   }
   openModal(`
@@ -432,7 +562,7 @@ function handlePairingCodeFlow(code) {
     <form id="pair-pin-form" class="stack">
       <input type="password" id="pair-pin-inp" class="input mono" placeholder="PIN" autofocus required />
       <div class="row" style="justify-content:flex-end;">
-        <button type="submit" class="btn btn-primary btn-sm">Entsperren & koppeln</button>
+        <button type="submit" class="btn btn-primary btn-sm">Entsperren</button>
       </div>
     </form>
   `, (modalEl) => {
@@ -442,7 +572,7 @@ function handlePairingCodeFlow(code) {
       try {
         const obj = await decodePairingCode(code, modalEl.querySelector('#pair-pin-inp').value);
         closeModal();
-        await applyPairingObject(obj);
+        confirmAndApplyPairing(obj, { isPinProtected: true });
       } catch (err) {
         toast(err.message, 'err');
       }
@@ -546,7 +676,8 @@ function navigate(tab, opts = {}) {
   window.scrollTo({ top: 0, behavior: 'instant' });
 }
 
-function renderCurrentView() {
+function renderCurrentView({ preserveDrafts = false } = {}) {
+  const draftSnap = preserveDrafts ? captureViewDrafts() : null;
   updateSyncPills();
   renderBanners();
   const ctx = {
@@ -564,6 +695,8 @@ function renderCurrentView() {
   else if (currentTab === 'planner') renderPlannerView(viewRoot, ctx);
   else if (currentTab === 'stats') renderStatsView(viewRoot, ctx);
   else if (currentTab === 'more') renderMoreView(viewRoot, ctx);
+
+  if (draftSnap) restoreViewDrafts(draftSnap);
 }
 
 // Navigation & Keyboard Shortcuts (1-5 switch tabs, N focuses quick add, Strg+Z undoes)
@@ -636,20 +769,25 @@ store.onStorageError((msg, severity) => {
 });
 
 store.subscribe((state, meta = {}) => {
-  // Typing & modal protection: defer background-sync re-renders while user is editing an input or modal is open!
-  if (meta?.fromBackgroundSync && isUserActivelyEditing()) {
+  // Typing & modal protection: defer background-sync re-renders while user is editing an input, modal is open, or window is blurred (Alt-Tab)!
+  if (meta?.fromBackgroundSync && (isUserActivelyEditing() || !document.hasFocus())) {
     deferredRender = true;
     updateSyncPills();
     renderBanners();
     return;
   }
   deferredRender = false;
-  renderCurrentView();
+  renderCurrentView({ preserveDrafts: Boolean(meta?.fromBackgroundSync) });
 });
 
 document.addEventListener('focusout', () => {
   if (!deferredRender) return;
-  setTimeout(flushDeferredRenderIfReady, 120);
+  setTimeout(flushDeferredRenderIfReady, 150);
+});
+
+window.addEventListener('focus', () => {
+  if (!deferredRender) return;
+  setTimeout(flushDeferredRenderIfReady, 150);
 });
 
 store.onSyncTrigger(() => scheduleAutoSync());

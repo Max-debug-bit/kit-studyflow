@@ -46,6 +46,20 @@ export function escapeHtml(str) {
     .replace(/'/g, '&#39;');
 }
 
+let _lastNumericId = 0;
+export function nextNumericId() {
+  const base = Date.now() * 1000;
+  _lastNumericId = Math.max(_lastNumericId + 1, base);
+  return _lastNumericId;
+}
+
+export function compareIds(a, b) {
+  if (typeof a === 'number' && typeof b === 'number' && Number.isFinite(a) && Number.isFinite(b)) {
+    return a - b;
+  }
+  return String(a ?? '').localeCompare(String(b ?? ''));
+}
+
 export function isValidIsoDate(str) {
   if (typeof str !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(str)) return false;
   const [y, m, d] = str.split('-').map(Number);
@@ -169,6 +183,7 @@ export function createDefaultState() {
     cf: [],         // caffeine { id, d, t, mg, n }
     cl: 400,        // caffeine daily limit mg
     tm: null,       // active timer object or null
+    tmUpdatedAt: 0, // dedicated timestamp for multi-device timer sync
     ui: {
       d_hero: true,
       d_live: true,
@@ -234,7 +249,7 @@ export function createDefaultState() {
     ai: {
       apiKey: '',
       syncApiKeyInGist: false,
-      model: 'gemini-3.8-flash',
+      model: 'gemini-2.5-flash',
       lastWorkingModel: '',
       energyMode: 'normal', // 'reset' | 'normal' | 'fokus'
       rhythmNotes: '',      // Flexible, soft weekly rhythm guidelines evolved with Gemini in Weekly Review
@@ -505,6 +520,17 @@ class Store {
         .replace(/\(ca\.\s*150[–-]180\s*Min\.\s*mit Pausieren\)/gi, '(Richtwert laut Aufgaben-Katalog / Modul-Regeln)');
     }
 
+    // Migrate non-existent Gemini model IDs from earlier builds to real public v1beta default
+    if (state.ai) {
+      const deadModels = new Set(['gemini-3.8-flash', 'gemini-3.5-flash', 'gemini-3.5-flash-lite']);
+      if (!state.ai.model || deadModels.has(state.ai.model)) {
+        state.ai.model = 'gemini-2.5-flash';
+      }
+      if (deadModels.has(state.ai.lastWorkingModel)) {
+        state.ai.lastWorkingModel = '';
+      }
+    }
+
     return state;
   }
 
@@ -662,7 +688,7 @@ class Store {
       } else if (mode === 'last') {
         const sorted = [...list].sort((a, b) => {
           const cmp = (a.t || '').localeCompare(b.t || '');
-          return cmp !== 0 ? cmp : (a.id - b.id);
+          return cmp !== 0 ? cmp : compareIds(a.id, b.id);
         });
         const winner = sorted[sorted.length - 1];
         values[kind] = Number(winner.m) || 0;
@@ -673,7 +699,7 @@ class Store {
         for (const item of list) {
           if ((Number(item.m) || 0) > (Number(winner.m) || 0)) {
             winner = item;
-          } else if ((Number(item.m) || 0) === (Number(winner.m) || 0) && item.id > winner.id) {
+          } else if ((Number(item.m) || 0) === (Number(winner.m) || 0) && compareIds(item.id, winner.id) > 0) {
             winner = item;
           }
         }
@@ -698,9 +724,15 @@ class Store {
     }
   }
 
-  addEntry({ d, t, m, k, mod = '', act = '', note = '', sessionMin = 0, catalogId = '', save = true }) {
+  addEntry({ id = null, d, t, m, k, mod = '', act = '', note = '', sessionMin = 0, catalogId = '', save = true }) {
     const minutes = Math.round(Number(m) || 0);
     if (minutes <= 0) return { ok: false, message: 'Bitte mindestens 1 Minute eingeben.' };
+    if (id !== null && id !== undefined && id !== '') {
+      const existing = this.state.e.find((x) => String(x.id) === String(id));
+      if (existing) {
+        return { ok: true, entry: existing, counts: true, changed: false, deduplicated: true, message: 'Eintrag bereits vorhanden.' };
+      }
+    }
     const dateStr = d || toDateStr();
     const timeStr = t || toTimeStr();
     const before = this.getDayBreakdown(dateStr);
@@ -714,7 +746,7 @@ class Store {
 
     const resolvedCatalogId = catalogId || (k !== 'p' ? (this.matchCatalogItemForText(note, act, mod)?.id || '') : '');
     const entry = {
-      id: Date.now() + Math.floor(Math.random() * 100),
+      id: (id !== null && id !== undefined && id !== '') ? id : nextNumericId(),
       d: dateStr,
       t: timeStr,
       m: minutes,
@@ -751,7 +783,8 @@ class Store {
   deleteEntry(id) {
     this.pushUndo('Eintrag gelöscht');
     this.markDeleted(id);
-    this.state.e = this.state.e.filter((x) => x.id !== id);
+    const key = String(id);
+    this.state.e = this.state.e.filter((x) => String(x.id) !== key);
     this.save();
   }
 
@@ -841,7 +874,7 @@ class Store {
     const amount = Math.round(Number(mg) || 0);
     if (amount <= 0) return null;
     const item = {
-      id: Date.now() + Math.floor(Math.random() * 100),
+      id: nextNumericId(),
       d: d || toDateStr(),
       t: t || toTimeStr(),
       mg: amount,
@@ -856,7 +889,8 @@ class Store {
   deleteCaffeine(id) {
     this.pushUndo('Koffein gelöscht');
     this.markDeleted(id);
-    this.state.cf = this.state.cf.filter((x) => x.id !== id);
+    const key = String(id);
+    this.state.cf = this.state.cf.filter((x) => String(x.id) !== key);
     this.save();
   }
 
@@ -921,11 +955,13 @@ class Store {
   // ---------- Timer ----------
 
   startTimer({ mode = 'countdown', kind = 'l', durationMin = 45, planBlockId = null, mod = '', note = '', act = '', catalogId = '' }) {
+    const nowTs = Date.now();
     this.state.tm = {
+      timerRunId: `tm_${nowTs}_${Math.random().toString(36).slice(2, 6)}`,
       running: true,
       mode,
       kind,
-      startedAt: Date.now(),
+      startedAt: nowTs,
       durationSec: mode === 'countdown' ? Math.max(60, Math.round(durationMin * 60)) : 0,
       planBlockId,
       mod: mod || '',
@@ -933,6 +969,7 @@ class Store {
       act: act || '',
       catalogId: catalogId || ''
     };
+    this.state.tmUpdatedAt = nowTs;
     this.state.ui.tdt = true; // auto-open timer panel
     this.save();
   }
@@ -974,6 +1011,7 @@ class Store {
     const tStr = toTimeStr(finishedAt);
 
     this.state.tm = null;
+    this.state.tmUpdatedAt = Date.now();
 
     if (minutes < 1) {
       this.save();
@@ -985,6 +1023,7 @@ class Store {
     const newVal = this.state.mode === 'sum' ? minutes : before[st.kind] + minutes;
     const finalAct = st.kind === 'a' ? 'anki' : st.kind === 'p' ? '' : (st.act || '');
     const added = this.addEntry({
+      id: st.timerRunId || null,
       d: dStr,
       t: tStr,
       m: newVal,
@@ -1013,14 +1052,18 @@ class Store {
       minutes,
       kind: st.kind,
       fromExpiry,
-      message: fromExpiry
-        ? `Countdown beendet! +${fmtMin(minutes)} automatisch gespeichert.`
-        : `Timer gespeichert: +${fmtMin(minutes)} zum heutigen Tageswert addiert.`
+      deduplicated: Boolean(added?.deduplicated),
+      message: added?.deduplicated
+        ? 'Timer wurde bereits auf einem anderen Gerät gespeichert.'
+        : (fromExpiry
+            ? `Countdown beendet! +${fmtMin(minutes)} automatisch gespeichert.`
+            : `Timer gespeichert: +${fmtMin(minutes)} zum heutigen Tageswert addiert.`)
     };
   }
 
   discardTimer() {
     this.state.tm = null;
+    this.state.tmUpdatedAt = Date.now();
     this.save();
   }
 
@@ -1374,7 +1417,7 @@ class Store {
 
     const sorted = [...this.state.e]
       .filter((x) => x.k === 'l' || x.k === 'a')
-      .sort((a, b) => (b.d + (b.t || '')).localeCompare(a.d + (a.t || '')) || b.id - a.id);
+      .sort((a, b) => (b.d + (b.t || '')).localeCompare(a.d + (a.t || '')) || compareIds(b.id, a.id));
 
     for (const x of sorted) {
       // Never blindly treat cumulative 'max' totals without blockMin as single-task durations!
@@ -1587,7 +1630,7 @@ class Store {
   }
 
   // AI-safe ADD-ONLY helper: AI can suggest/add new blueprints, NEVER delete or overwrite existing ones!
-  addCatalogItemsFromAi(rawItems = []) {
+  addCatalogItemsFromAi(rawItems = [], { save = true } = {}) {
     if (!Array.isArray(rawItems) || !rawItems.length) return 0;
     if (!Array.isArray(this.state.taskCatalog)) this.state.taskCatalog = [];
     const existingTitles = new Set(this.state.taskCatalog.map((c) => c.title.toLowerCase().trim()));
@@ -1611,7 +1654,7 @@ class Store {
       existingTitles.add(title.toLowerCase());
       added++;
     }
-    if (added > 0) this.save();
+    if (added > 0 && save) this.save();
     return added;
   }
 
